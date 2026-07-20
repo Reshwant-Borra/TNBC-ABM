@@ -1,0 +1,29 @@
+execution: 920 complete checkpoints, 0 simulations to run, 8 threads
+confirmation parameters (18): divProbMP,dieProbMP,divProbFN,stressStrength,divProbMN,dieProbMN,divProbP,pOffMax,dieProbFN,migrProbP,dieProbEN,clusterRadius,initialJnkPositiveTenths,dieProbFP,initialMacrophageCount,initPop,ecSurvival,activProbM
+confirmation trajectory points: 571 of 920
+execution: 0 complete checkpoints, 1713 simulations to run, 8 threads
+WARNING: Final field G in class HAL.GridsAndAgents.AgentBase has been mutated reflectively by class HAL.GridsAndAgents.InternalGridAgentList in unnamed module @1fed11cc (file:/Users/80034573/Downloads/abc-run/HAL-freq.jar)
+WARNING: Use --enable-final-field-mutation=ALL-UNNAMED to avoid a warning
+WARNING: Mutating final fields will be blocked in a future release unless final field mutation is enabled
+  85/1713 new simulations complete
+  170/1713 new simulations complete
+  255/1713 new simulations complete
+  340/1713 new simulations complete
+  425/1713 new simulations complete
+  510/1713 new simulations complete
+  595/1713 new simulations complete
+  680/1713 new simulations complete
+  765/1713 new simulations complete
+  850/1713 new simulations complete
+  935/1713 new simulations complete
+  1020/1713 new simulations complete
+  1105/1713 new simulations complete
+  1190/1713 new simulations complete
+  1275/1713 new simulations complete
+  1360/1713 new simulations complete
+  1445/1713 new simulations complete
+  1530/1713 new simulations complete
+  1615/1713 new simulations complete
+  1700/1713 new simulations complete
+  1713/1713 new simulations complete
+confirmation selected 18 parameters and 571 trajectory points; wrote results/morris-primary-20/morris_confirmed_rankings.csv

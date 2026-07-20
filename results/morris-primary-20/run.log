@@ -1,0 +1,26 @@
+Morris design: k=45 trajectories=20 levels=6 delta=0.600000 points=920 duplicates=0 designSeed=6949820704716978156
+execution: 0 complete checkpoints, 920 simulations to run, 8 threads
+WARNING: Final field G in class HAL.GridsAndAgents.AgentBase has been mutated reflectively by class HAL.GridsAndAgents.InternalGridAgentList in unnamed module @3c776d38 (file:/Users/80034573/Downloads/abc-run/HAL-freq.jar)
+WARNING: Use --enable-final-field-mutation=ALL-UNNAMED to avoid a warning
+WARNING: Mutating final fields will be blocked in a future release unless final field mutation is enabled
+  46/920 new simulations complete
+  92/920 new simulations complete
+  138/920 new simulations complete
+  184/920 new simulations complete
+  230/920 new simulations complete
+  276/920 new simulations complete
+  322/920 new simulations complete
+  368/920 new simulations complete
+  414/920 new simulations complete
+  460/920 new simulations complete
+  506/920 new simulations complete
+  552/920 new simulations complete
+  598/920 new simulations complete
+  644/920 new simulations complete
+  690/920 new simulations complete
+  736/920 new simulations complete
+  782/920 new simulations complete
+  828/920 new simulations complete
+  874/920 new simulations complete
+  920/920 new simulations complete
+complete: /Users/80034573/Downloads/abc-run/results/morris-primary-20

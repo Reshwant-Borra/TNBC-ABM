@@ -1,0 +1,26 @@
+parameter,outcome,rb,p_val,baseline,lower,upper,status,valid_frac,inv_type
+dieProbEP,EC_POPULATION_ZERO,0.50358974359,0.00497512437811,0.008,0.001,0.02,fixed,0.891150442477876,biologically-possible population loss
+dieProbEN,EC_POPULATION_ZERO,0.469143686502,0.00497512437811,0.005,0.001,0.01,fixed,0.915929203539823,biologically-possible population loss
+activProbE,EC_POPULATION_ZERO,-0.270188679245,0.00497512437811,0.0594775137265,0.005,0.08,ABC-inferred,0.908849557522124,biologically-possible population loss
+dieProbMN,EC_POPULATION_ZERO,-0.249966134494,0.00497512437811,0.005,0.001,0.01,fixed,0.9292035398230089,biologically-possible population loss
+fibroblastSignalCap,EC_POPULATION_ZERO,-0.225447508466,0.00497512437811,10.0,5.0,15.0,hard-coded,0.9495575221238938,biologically-possible population loss
+stressStrength,FIBROBLAST_POPULATION_ZERO,-0.891891891892,0.00497512437811,1.5,0.0,3.0,fixed,0.9283185840707964,biologically-possible population loss
+dieProbFN,FIBROBLAST_POPULATION_ZERO,0.856981981982,0.00497512437811,0.008,0.001,0.008,fixed,0.9274336283185842,biologically-possible population loss
+dieProbEN,FIBROBLAST_POPULATION_ZERO,0.804898648649,0.00497512437811,0.005,0.001,0.01,fixed,0.915929203539823,biologically-possible population loss
+fibroblastTumorRadius,FIBROBLAST_POPULATION_ZERO,-0.800394144144,0.00497512437811,3.5,1.5,5.5,hard-coded,0.8920353982300885,biologically-possible population loss
+fibroblastSignalCap,FIBROBLAST_POPULATION_ZERO,-0.789132882883,0.00497512437811,10.0,5.0,15.0,hard-coded,0.9495575221238938,biologically-possible population loss
+dieProbEN,GENERAL_INVALID,0.369068576863,0.00497512437811,0.005,0.001,0.01,fixed,0.915929203539823,downstream denominator / composite-target
+cafDivBoost,GENERAL_INVALID,0.28001375989,0.00497512437811,0.427609468482,0.0,1.0,ABC-inferred,0.9752212389380532,downstream denominator / composite-target
+clusterRadius,GENERAL_INVALID,-0.217831198527,0.00497512437811,4.0,2.0,8.0,fixed,0.9106194690265488,downstream denominator / composite-target
+migrProbP,GENERAL_INVALID,0.207571986483,0.00497512437811,0.1,0.0,0.3,fixed,0.8867256637168142,downstream denominator / composite-target
+endothelialDaughterDivisionBoost,GENERAL_INVALID,-0.186750035411,0.00497512437811,0.001,0.00025,0.002,hard-coded,0.892920353982301,downstream denominator / composite-target
+dieProbMP,MACROPHAGE_POPULATION_ZERO,0.685938500961,0.00497512437811,0.015,0.001,0.03,fixed,0.8469026548672567,biologically-possible population loss
+activProbF,MACROPHAGE_POPULATION_ZERO,-0.584881486227,0.00497512437811,0.0235917824107,0.001,0.05,ABC-inferred,0.8999999999999999,biologically-possible population loss
+initialJnkPositiveTenths,MACROPHAGE_POPULATION_ZERO,0.562780269058,0.00497512437811,9.0,5.0,10.0,hard-coded,0.8902654867256636,biologically-possible population loss
+endothelialDaughterDivisionBoost,MACROPHAGE_POPULATION_ZERO,0.544843049327,0.00497512437811,0.001,0.00025,0.002,hard-coded,0.892920353982301,biologically-possible population loss
+divProbMP,MACROPHAGE_POPULATION_ZERO,-0.511691223575,0.00497512437811,0.01575,0.001,0.03,fixed,0.8831858407079647,biologically-possible population loss
+clusterRadius,TUMOR_EXTINCT,-0.391000922123,0.00497512437811,4.0,2.0,8.0,fixed,0.9106194690265488,biologically-possible extinction
+fibroblastTumorRadius,TUMOR_EXTINCT,-0.390078799564,0.00497512437811,3.5,1.5,5.5,hard-coded,0.8920353982300885,biologically-possible extinction
+dieProbP,TUMOR_EXTINCT,0.37798641965,0.00497512437811,0.00306108452805,0.001,0.004,ABC-inferred,0.8893805309734514,biologically-possible extinction
+cafDivBoost,TUMOR_EXTINCT,0.375157179982,0.00497512437811,0.427609468482,0.0,1.0,ABC-inferred,0.9752212389380532,biologically-possible extinction
+endothelialDaughterDivisionBoost,TUMOR_EXTINCT,-0.363714477324,0.00497512437811,0.001,0.00025,0.002,hard-coded,0.892920353982301,biologically-possible extinction

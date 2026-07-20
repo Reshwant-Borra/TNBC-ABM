@@ -1,0 +1,18 @@
+{
+  "input_dir": "/Users/80034573/Downloads/abc-run/results/dev-smoke-1",
+  "runs": 46,
+  "finite_runs": 46,
+  "outputs": 55,
+  "parameters": 45,
+  "figures": {
+    "mu_star_sigma": 0,
+    "top_mu_star": 31,
+    "heatmap": 1,
+    "failure": 1,
+    "rank_comparison": 1,
+    "ee_distributions": 31,
+    "parameter_output_scatter": 31,
+    "runtime_validity": 2
+  },
+  "scipy_available": false
+}

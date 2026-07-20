@@ -1,0 +1,18 @@
+{
+  "input_dir": "/Users/80034573/Downloads/abc-run/results/morris-primary-20",
+  "runs": 920,
+  "finite_runs": 357,
+  "outputs": 127,
+  "parameters": 45,
+  "figures": {
+    "mu_star_sigma": 126,
+    "top_mu_star": 126,
+    "heatmap": 1,
+    "failure": 1,
+    "rank_comparison": 1,
+    "ee_distributions": 126,
+    "parameter_output_scatter": 126,
+    "runtime_validity": 2
+  },
+  "scipy_available": false
+}

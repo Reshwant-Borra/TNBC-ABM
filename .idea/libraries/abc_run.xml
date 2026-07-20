@@ -1,0 +1,11 @@
+<component name="libraryTable">
+  <library name="abc-run">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/HAL-freq.jar!/" />
+      <root url="jar://$PROJECT_DIR$/lwjgl_util.jar!/" />
+      <root url="jar://$PROJECT_DIR$/lwjgl.jar!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>

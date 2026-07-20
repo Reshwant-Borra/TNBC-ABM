@@ -1,0 +1,9 @@
+{
+  "input_dir": "/Users/80034573/Downloads/abc-run/results/morris-smoke",
+  "runs": 92,
+  "finite_runs": 39,
+  "outputs": 127,
+  "parameters": 45,
+  "figures": {},
+  "scipy_available": false
+}
