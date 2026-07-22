@@ -1,0 +1,35 @@
+{
+  "schema_version": "tnbc-abm-calibration-freeze-v1",
+  "created_at_utc": "2026-07-22T15:36:15.675819Z",
+  "repository_commit_sha": "ae77dc5db82fa78075107dac570986d67dcae103",
+  "branch": "main",
+  "working_tree_dirty": true,
+  "source_file_hashes": {
+    "OnLatticeExample/ExampleGrid.java": "0821b7fa4ab8dd3d8e213161d70ae3933ff706bfcf76d87a6b37020a831f0039",
+    "OnLatticeExample/ModelParameters.java": "40f3698e075339df79fc18bc8842f3967f02a9e1c8379b58895da7e92900b695",
+    "OnLatticeExample/ABCRejection.java": "743028ac9e42571df4e0f05d59f2d0f065b9ba1c4c643abdb8df1b4362d34a62",
+    "OnLatticeExample/CalibrationProfile.java": "e88caf46d3c04514054027d72aa3e2c6b4f393272b691895824cdf84c7669a13",
+    "OnLatticeExample/CalibrationTarget.java": "678507491f113bf95e2e7b54c48bb0f3aecd1bc04a0553f6e547fc6421a88089"
+  },
+  "coordinate_file_hashes": {
+    "QuadratEndothelialOn.txt": "169618f369bd6f880fb2f197a146308f3f84b047565b908b27eb52188abaceaa",
+    "QuadratStrOn.txt": "fca3eba27df2ac18dec2bd13800b26f1254c0fb939899be196273c34cfa5cef6"
+  },
+  "model_class": "OnLatticeExample.ExampleGrid",
+  "calibration_entry_point": "OnLatticeExample.ABCRejection",
+  "grid_dimensions": {"width": 100, "height": 100},
+  "simulation_horizon_steps": 1440,
+  "snapshot_steps": [0, 480, 960, 1440],
+  "initial_tumor_count_default": 25,
+  "initial_endothelial_coordinates": 237,
+  "initial_fibroblast_coordinates": 142,
+  "baseline_seed_policy": "ABC run seeds are deterministic functions of master seed and draw index; each simulation gets a fresh ExampleGrid and HAL Rand",
+  "update_semantics": "ShuffleAgents(rng), randomized asynchronous per-step update, Von Neumann movement/division hood",
+  "treatment_status": "untreated through maxStep 1440; chemotherapy branch starts after step 2898",
+  "parameter_profile_name": "core4",
+  "parameter_profile_hash": "b632133b4a6f25c2b13071f7ae02ed64e2f7698b1a3abc3215ddcd1f0a4a742e",
+  "target_profile_name": "current_abc_targets",
+  "target_profile_hash": "447c5e42bcc1368716b4c371f3adffb193ccf7660d96af0c0c1143fa881ca1b4",
+  "distance_function_name": "weighted_scaled_euclidean_with_infinite_final_tumor_extinction_and_residual3_missing_stroma",
+  "result_provenance": "Morris evidence from results/morris-pilot-10 and results/morris-primary-20; freeze generated from Java definitions"
+}

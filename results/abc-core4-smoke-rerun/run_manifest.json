@@ -1,0 +1,30 @@
+{
+  "repository_commit": "ae77dc5db82fa78075107dac570986d67dcae103",
+  "working_tree_dirty": true,
+  "profile": "core4",
+  "target_profile": "current_abc_targets",
+  "master_seed": 12345,
+  "draws": 4,
+  "epsilon_mode": "quantile",
+  "epsilon": -1,
+  "selected_epsilon": 5.98849878777,
+  "quantile": 0.500000000000,
+  "init_population": 25,
+  "max_step": 1440,
+  "start_time": "2026-07-22T15:37:26.831797Z",
+  "completion_status": "COMPLETE",
+  "valid_runs": 2,
+  "accepted_runs": 2,
+  "runtime_ms": 22029,
+  "java_version": "26.0.1",
+  "operating_system": "Mac OS X 26.5.2",
+  "target_hash": "447c5e42bcc1368716b4c371f3adffb193ccf7660d96af0c0c1143fa881ca1b4",
+  "parameter_freeze_hash": "b632133b4a6f25c2b13071f7ae02ed64e2f7698b1a3abc3215ddcd1f0a4a742e",
+  "source_hashes": {
+    "OnLatticeExample/ExampleGrid.java": "0821b7fa4ab8dd3d8e213161d70ae3933ff706bfcf76d87a6b37020a831f0039",
+    "OnLatticeExample/ModelParameters.java": "40f3698e075339df79fc18bc8842f3967f02a9e1c8379b58895da7e92900b695",
+    "OnLatticeExample/ABCRejection.java": "743028ac9e42571df4e0f05d59f2d0f065b9ba1c4c643abdb8df1b4362d34a62",
+    "OnLatticeExample/CalibrationProfile.java": "e88caf46d3c04514054027d72aa3e2c6b4f393272b691895824cdf84c7669a13",
+    "OnLatticeExample/CalibrationTarget.java": "678507491f113bf95e2e7b54c48bb0f3aecd1bc04a0553f6e547fc6421a88089"
+  }
+}

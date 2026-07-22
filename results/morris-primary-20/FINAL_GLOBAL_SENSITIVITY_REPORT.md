@@ -227,3 +227,30 @@ over the current 12 parameters as the main workflow.
 **The model is NOT calibrated.** This report screens influence over specified ranges; it does not estimate
 posteriors, prove identifiability, estimate Sobol indices, or justify deleting mechanisms. Decision detail:
 `FINAL_PARAMETER_DECISION_TABLE.csv`.
+
+## 23. Independent confirmatory addendum (2026-07-22)
+
+An additional independent Morris confirmation was run after this report:
+`../morris-independent-confirm-20x5/`.
+
+Design: 20 newly generated trajectories, 45 screened parameters, 6 levels, master seed `2026072201`,
+design seed `-1836350308661608582`, and 5 matched stochastic replicates per trajectory point
+(4,600 simulations). No `ExampleGrid.java` changes were made. QC passed 11/11 checks.
+
+Compared with the primary 20-trajectory design, the independent run gave overall Spearman 0.823,
+top-10 overlap 9/10, and top-15 overlap 12/15. The most influential fixed macrophage, fibroblast,
+EC, stress, and migration parameters remained influential. `divProbP` and `pOffMax` remained the
+best-supported calibration parameters. `dieProbN` remained stable but moderate. `divProbFP` weakened
+materially (primary rank 20 -> independent rank 32), while `activProbF` strengthened (34 -> 15) but
+with substantial old/new rank movement.
+
+This addendum supersedes the exact `core4` recommendation above. Updated recommendation:
+
+- Calibrate now: `divProbP`, `pOffMax`, `dieProbN` (with `dieProbN` treated as a cautious extinction/
+  boundary parameter and `netN` fixed unless a joint parameterization is reviewed).
+- Do not run the existing `core4` unchanged unless a deliberate continuity decision keeps `divProbFP`.
+- If a fibroblast degree of freedom is required in the first ABC profile, the new evidence favors
+  mentor review of `activProbF` over automatic retention of `divProbFP`.
+
+See `../morris-independent-confirm-20x5/INDEPENDENT_CONFIRMATORY_MORRIS_REPORT.md` and
+`../morris-independent-confirm-20x5/COMBINED_CALIBRATION_RECOMMENDATION.csv`.
