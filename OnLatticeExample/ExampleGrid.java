@@ -691,6 +691,26 @@ public class ExampleGrid extends AgentGrid2D<ExampleCell> {
     // {tumorRadius,tumorRmsSpread,jnkpRimFraction,activeMacrophageEcColocalization}
     public double[][] lastSpatialMetrics;
 
+    public static final class DiagnosticFrame {
+        public final int step;
+        public final int[] counts;
+        public final int[] cumulativeEvents;
+        DiagnosticFrame(int step, int[] counts, int[] cumulativeEvents) {
+            this.step = step;
+            this.counts = counts.clone();
+            this.cumulativeEvents = cumulativeEvents.clone();
+        }
+    }
+
+    public static final class DiagnosticRun {
+        public final int[][] snapshots;
+        public final ArrayList<DiagnosticFrame> frames;
+        DiagnosticRun(int[][] snapshots, ArrayList<DiagnosticFrame> frames) {
+            this.snapshots = snapshots;
+            this.frames = frames;
+        }
+    }
+
 
     public ExampleGrid(int x, int y) throws IOException {
         super(x, y, ExampleCell.class);
@@ -908,6 +928,51 @@ public class ExampleGrid extends AgentGrid2D<ExampleCell> {
     }
 
     private int[][] runHeadlessConfigured(int initPop, int maxStep) throws IOException {
+        return runHeadlessConfigured(initPop, maxStep, null);
+    }
+
+    public DiagnosticRun RunHeadlessDiagnostic(ModelParameters p, int maxStep, int diagnosticInterval) throws IOException {
+        p.validate();
+        this.dieProbN=p.dieProbN; this.divProbN=p.dieProbN+p.netN;
+        this.pOnMax=p.pOnMax; this.pOffMax=p.pOffMax; this.divProbP=p.divProbP; this.dieProbP=p.dieProbP;
+        this.cafDivBoost=p.cafDivBoost; this.ecSurvival=p.ecSurvival; this.activProbF=p.activProbF;
+        this.divProbFP=p.divProbFP; this.activProbM=p.activProbM; this.activProbE=p.activProbE;
+        this.recruitBias=p.recruitBias; this.lambdaCAF=p.lambdaCAF; this.stressStrength=p.stressStrength;
+        this.lambdaStress=p.lambdaStress; this.migrProbP=p.migrProbP; this.migrProbN=p.migrProbN;
+        this.divProbFN=p.divProbFN; this.dieProbFN=p.dieProbFN; this.dieProbFP=p.dieProbFP;
+        this.divProbMN=p.divProbMN; this.dieProbMN=p.dieProbMN; this.divProbMP=p.divProbMP;
+        this.dieProbMP=p.dieProbMP; this.migrProbM=p.migrProbM; this.dieProbEN=p.dieProbEN;
+        this.divProbEP=p.divProbEP; this.dieProbEP=p.dieProbEP; this.deactProbE=p.deactProbE;
+        this.dieProbL=p.dieProbL; this.macrophageDaughterActivationBoost=p.macrophageDaughterActivationBoost;
+        this.endothelialDaughterDivisionBoost=p.endothelialDaughterDivisionBoost;
+        this.fibroblastSignalBoost=p.fibroblastSignalBoost; this.fibroblastSignalCap=p.fibroblastSignalCap;
+        this.tumorEndothelialRadius=p.tumorEndothelialRadius;
+        this.macrophageInteractionRadius=p.macrophageInteractionRadius;
+        this.macrophageEndothelialBiasRadius=p.macrophageEndothelialBiasRadius;
+        this.endothelialMacrophageRadius=p.endothelialMacrophageRadius;
+        this.fibroblastTumorRadius=p.fibroblastTumorRadius; this.clusterRadius=p.clusterRadius;
+        this.initialJnkPositiveTenths=p.initialJnkPositiveTenths;
+        this.initialMacrophageCount=p.initialMacrophageCount; this.initialLungCount=p.initialLungCount;
+        ArrayList<DiagnosticFrame> frames = new ArrayList<>();
+        int interval = Math.max(1, diagnosticInterval);
+        int[][] snapshots = runHeadlessConfigured(p.initPop, maxStep, (step, counts, events) -> {
+            if (step == 0 || step == maxStep || step % interval == 0 || requiredCompartmentLost(counts)) {
+                frames.add(new DiagnosticFrame(step, counts, events));
+            }
+        });
+        return new DiagnosticRun(snapshots, frames);
+    }
+
+    interface DiagnosticRecorder {
+        void record(int step, int[] counts, int[] cumulativeEvents);
+    }
+
+    static boolean requiredCompartmentLost(int[] c) {
+        if (c == null || c.length < 8) return true;
+        return c[0] + c[1] == 0 || c[2] + c[3] == 0 || c[4] + c[5] == 0 || c[6] + c[7] == 0;
+    }
+
+    private int[][] runHeadlessConfigured(int initPop, int maxStep, DiagnosticRecorder diagnosticRecorder) throws IOException {
         if (maxStep < 0) throw new IllegalArgumentException("maxStep must be non-negative");
         this.headless = true;
         this.InitPop = initPop;
@@ -956,11 +1021,13 @@ public class ExampleGrid extends AgentGrid2D<ExampleCell> {
             }
         }
 
-        snaps.add(DetailedCounts());
+        int[] currentCounts = DetailedCounts();
+        snaps.add(currentCounts);
         rimCore.add(jnkpRimCore());
         reachedSteps.add(0);
         eventCounts.add(cumulativeEvents.clone());
         spatialMetrics.add(SpatialMetrics());
+        if (diagnosticRecorder != null) diagnosticRecorder.record(0, currentCounts, diagnosticEvents(cumulativeEvents));
         for (int i=0; i<maxStep; i++) {                    // calibration horizon (default 1440 = day 21)
             IncTick();
             if (i<=2898) StepCellR(); else StepCellRChemo();  // chemo unused (maxStep=1440); dead branch
@@ -969,8 +1036,10 @@ public class ExampleGrid extends AgentGrid2D<ExampleCell> {
             cumulativeEvents[4]+=numDivM; cumulativeEvents[5]+=numDieM;
             cumulativeEvents[6]+=numDivE; cumulativeEvents[7]+=numDieE;
             cumulativeEvents[8]+=numDivT; cumulativeEvents[9]+=numDieT;
+            currentCounts = DetailedCounts();
+            if (diagnosticRecorder != null) diagnosticRecorder.record(i+1, currentCounts, diagnosticEvents(cumulativeEvents));
             for (int s : snapSteps) if (i+1==s) {
-                snaps.add(DetailedCounts());
+                snaps.add(currentCounts);
                 rimCore.add(jnkpRimCore());
                 reachedSteps.add(s);
                 eventCounts.add(cumulativeEvents.clone());
@@ -983,6 +1052,14 @@ public class ExampleGrid extends AgentGrid2D<ExampleCell> {
         this.lastEventCounts = eventCounts.toArray(new int[0][]);
         this.lastSpatialMetrics = spatialMetrics.toArray(new double[0][]);
         return snaps.toArray(new int[0][]);
+    }
+
+    private int[] diagnosticEvents(int[] cumulativeEvents) {
+        int[] out = new int[12];
+        System.arraycopy(cumulativeEvents, 0, out, 0, Math.min(cumulativeEvents.length, 10));
+        out[10] = macDivTry;
+        out[11] = macDivFail;
+        return out;
     }
 
     // ----------------------------------------------------------------

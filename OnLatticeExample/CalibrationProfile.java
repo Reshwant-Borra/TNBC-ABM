@@ -68,9 +68,23 @@ public final class CalibrationProfile {
     }
 
     public static CalibrationProfile byName(String name) {
+        if ("core2".equals(name)) return core2();
         if ("core4".equals(name)) return core4();
         if ("legacy12".equals(name)) return legacy12();
-        throw new IllegalArgumentException("unknown calibration profile: " + name + " (expected core4 or legacy12)");
+        throw new IllegalArgumentException("unknown calibration profile: " + name + " (expected core2, core4, or legacy12)");
+    }
+
+    public static CalibrationProfile core2() {
+        ArrayList<Parameter> p = new ArrayList<>();
+        addLinear(p, "divProbP", "diagnostic inferred",
+                "CALIBRATE_DIAGNOSTIC",
+                "Temporary core2 diagnostic: JNK-positive tumour division driver; uniform linear Java ABC bounds",
+                "diagnostic pilot; freeze before scientific use");
+        addLinear(p, "pOffMax", "diagnostic inferred",
+                "CALIBRATE_DIAGNOSTIC",
+                "Temporary core2 diagnostic: JNK-positive to JNK-negative switch-off driver; uniform linear Java ABC bounds",
+                "diagnostic pilot; freeze before scientific use");
+        return new CalibrationProfile("core2", "Temporary diagnostic ABC profile for tumour growth and JNK switch-off", p);
     }
 
     public static CalibrationProfile core4() {
@@ -107,6 +121,13 @@ public final class CalibrationProfile {
         ModelParameters.Definition d = ModelParameters.definition(name);
         p.add(new Parameter(name, d.transform, role,
                 "Uniform on " + d.transform.name().toLowerCase(Locale.ROOT) + " scale over registry bounds",
+                decision, justification, approval));
+    }
+
+    private static void addLinear(ArrayList<Parameter> p, String name, String role, String decision,
+                                  String justification, String approval) {
+        p.add(new Parameter(name, ModelParameters.Transform.LINEAR, role,
+                "Uniform(lower_bound, upper_bound) in physical space",
                 decision, justification, approval));
     }
 
@@ -172,6 +193,16 @@ public final class CalibrationProfile {
         }
         if ("core4".equals(name) && !parameterNames().equals(Arrays.asList("divProbP", "pOffMax", "divProbFP", "dieProbN"))) {
             throw new IllegalStateException("core4 parameter list does not match final Morris decision");
+        }
+        if ("core2".equals(name) && !parameterNames().equals(Arrays.asList("divProbP", "pOffMax"))) {
+            throw new IllegalStateException("core2 parameter list does not match diagnostic decision");
+        }
+        if ("core2".equals(name)) {
+            for (Parameter p : parameters) {
+                if (p.samplingTransform != ModelParameters.Transform.LINEAR) {
+                    throw new IllegalStateException("core2 must use uniform linear sampling: " + p.name);
+                }
+            }
         }
     }
 
