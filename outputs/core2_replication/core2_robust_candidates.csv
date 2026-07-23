@@ -1,0 +1,2 @@
+robust_rank,candidate_id,divProbP,pOffMax,valid_fraction,fraction_distance_le_3,fraction_distance_le_4,median_distance,sd_distance,invalid_fraction,EC_loss_count,fibroblast_loss_count,robust_ranking_score
+1,16,0.0112198651510,0.158809491956,0.800000000000,0.400000000000,0.700000000000,2.95659946884,0.906502016264,0.200000000000,2,0,0.696591621590

@@ -90,6 +90,8 @@ public class ABCRejection {
         int draws = 1000;
         double epsilon = -1.0;
         double quantile = 0.05;
+        double candidateThreshold = Double.NaN;
+        double goodThreshold = 3.0;
         long seed = 12345L;
         int initPop = 25;
         int maxStep = 1440;
@@ -121,6 +123,8 @@ public class ABCRejection {
                     case "--draws": c.draws = Integer.parseInt(v); break;
                     case "--epsilon": c.epsilon = Double.parseDouble(v); break;
                     case "--quantile": c.quantile = Double.parseDouble(v); break;
+                    case "--candidate-threshold": c.candidateThreshold = Double.parseDouble(v); break;
+                    case "--good-threshold": c.goodThreshold = Double.parseDouble(v); break;
                     case "--seed": c.seed = Long.parseLong(v); break;
                     case "--init-pop": c.initPop = Integer.parseInt(v); break;
                     case "--max-step": c.maxStep = Integer.parseInt(v); break;
@@ -133,8 +137,16 @@ public class ABCRejection {
 
         Config validate() {
             CalibrationProfile.byName(profileName).validate();
+            if ("core2".equals(profileName) && Double.isNaN(candidateThreshold)) candidateThreshold = 4.0;
             if (draws < 1) throw new IllegalArgumentException("--draws must be positive");
             if (!Double.isFinite(epsilon)) throw new IllegalArgumentException("--epsilon must be finite; use -1 for quantile mode");
+            if (!Double.isNaN(candidateThreshold) && (!(candidateThreshold > 0.0) || !Double.isFinite(candidateThreshold))) {
+                throw new IllegalArgumentException("--candidate-threshold must be positive and finite");
+            }
+            if (!(goodThreshold > 0.0) || !Double.isFinite(goodThreshold)) throw new IllegalArgumentException("--good-threshold must be positive and finite");
+            if (!Double.isNaN(candidateThreshold) && goodThreshold > candidateThreshold) {
+                throw new IllegalArgumentException("--good-threshold must be <= --candidate-threshold");
+            }
             if (!(quantile > 0.0 && quantile <= 1.0)) throw new IllegalArgumentException("--quantile must be in (0,1]");
             if (initPop < 1) throw new IllegalArgumentException("--init-pop must be positive");
             if (maxStep < 0) throw new IllegalArgumentException("--max-step must be nonnegative");
@@ -157,6 +169,7 @@ public class ABCRejection {
         String failureReason = "";
         String errorClass = "";
         String errorMessage = "";
+        String fitCategory = "";
         boolean accepted;
         String existingCsvRow;
     }
@@ -203,7 +216,7 @@ public class ABCRejection {
 
         double eps = selectEpsilon(c, results);
         for (DrawResult r : results) {
-            if (r.existingCsvRow == null && r.distance != null) r.accepted = Double.isFinite(r.distance.distance) && r.distance.distance <= eps;
+            if (r.existingCsvRow == null && r.distance != null) classifyFitAndAcceptance(c, r, eps);
         }
         writeAllOutputs(c, profile, results, eps);
         Summary s = summarize(results, eps);
@@ -281,11 +294,31 @@ public class ABCRejection {
         }
     }
 
+    static void classifyFitAndAcceptance(Config c, DrawResult r, double eps) {
+        boolean valid = "VALID_FINITE".equals(r.outcomeStatus) && r.distance != null && Double.isFinite(r.distance.distance);
+        if (!valid) {
+            r.accepted = false;
+            r.fitCategory = "invalid";
+            return;
+        }
+        if (!Double.isNaN(c.candidateThreshold)) {
+            double d = r.distance.distance;
+            if (d <= c.goodThreshold) r.fitCategory = "good";
+            else if (d <= c.candidateThreshold) r.fitCategory = "borderline";
+            else r.fitCategory = "poor";
+            r.accepted = d <= c.candidateThreshold;
+        } else {
+            r.fitCategory = r.distance.distance <= eps ? "accepted_by_epsilon" : "rejected_by_epsilon";
+            r.accepted = r.distance.distance <= eps;
+        }
+    }
+
     static int[][] safeSnapshots(int[][] s) {
         return (s != null && s.length == CalibrationTarget.SNAP.length) ? s : new int[][]{{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0}};
     }
 
     static double selectEpsilon(Config c, List<DrawResult> results) {
+        if (!Double.isNaN(c.candidateThreshold)) return c.candidateThreshold;
         if (c.epsilon > 0.0) return c.epsilon;
         ArrayList<Double> finite = new ArrayList<>();
         for (DrawResult r : results) if (r.distance != null && Double.isFinite(r.distance.distance)) finite.add(r.distance.distance);
@@ -340,9 +373,10 @@ public class ABCRejection {
         List<String> row = CalibrationFreeze.parseCsv(r.existingCsvRow);
         int n = row.size();
         if (n < 5) throw new IllegalArgumentException("malformed resumed ABC row for draw " + r.drawId);
-        double distance = parseDouble(row.get(n - 5));
-        r.outcomeStatus = row.get(n - 4);
-        r.failureReason = row.get(n - 3);
+        double distance = parseDouble(row.get(n - 6));
+        r.outcomeStatus = row.get(n - 5);
+        r.failureReason = row.get(n - 4);
+        r.fitCategory = row.get(n - 3);
         r.runtimeMillis = (long) parseDouble(row.get(n - 2));
         r.accepted = Boolean.parseBoolean(row.get(n - 1));
         r.distance = new CalibrationTarget.DistanceResult(distance, Collections.emptyList(), r.outcomeStatus);
@@ -357,18 +391,30 @@ public class ABCRejection {
         results.sort(Comparator.comparingInt(x -> x.drawId));
         String header = allDrawsHeader(profile);
         try (BufferedWriter all = Files.newBufferedWriter(c.outputDir.resolve("abc_all_draws.csv"), StandardCharsets.UTF_8);
-             BufferedWriter acc = Files.newBufferedWriter(c.outputDir.resolve("abc_accepted.csv"), StandardCharsets.UTF_8)) {
+             BufferedWriter acc = Files.newBufferedWriter(c.outputDir.resolve("abc_accepted.csv"), StandardCharsets.UTF_8);
+             BufferedWriter best20 = Files.newBufferedWriter(c.outputDir.resolve("abc_best20_candidates.csv"), StandardCharsets.UTF_8)) {
             all.write(header); all.newLine();
             acc.write(header); acc.newLine();
+            best20.write(header); best20.newLine();
+            ArrayList<String> acceptedRows = new ArrayList<>();
             for (DrawResult r : results) {
                 String row = r.existingCsvRow == null ? drawCsvRow(profile, r, eps) : r.existingCsvRow;
                 all.write(row); all.newLine();
-                if (row.endsWith(",true")) { acc.write(row); acc.newLine(); }
+                if (row.endsWith(",true")) {
+                    acc.write(row); acc.newLine();
+                    acceptedRows.add(row);
+                }
+            }
+            acceptedRows.sort((a, b) -> Double.compare(csvDistance(a), csvDistance(b)));
+            for (int i = 0; i < Math.min(20, acceptedRows.size()); i++) {
+                best20.write(acceptedRows.get(i)); best20.newLine();
             }
         }
         writeDistanceSummary(c.outputDir.resolve("distance_summary.csv"), summarize(results, eps));
         writeBestBreakdown(c.outputDir.resolve("best_run_target_breakdown.csv"), best(results));
         Files.writeString(c.outputDir.resolve("resolved_config.json"), resolvedConfigJson(c, profile, "PENDING", 0, 0, eps, 0), StandardCharsets.UTF_8);
+        writeRuntimeFreeze(c.outputDir.resolve("core2_diagnostic_freeze.json"), c, profile, eps);
+        writeFrozenParameterValues(c.outputDir.resolve("frozen_parameter_values.csv"), profile, c.initPop);
     }
 
     static String allDrawsHeader(CalibrationProfile profile) {
@@ -377,7 +423,7 @@ public class ABCRejection {
         for (CalibrationTarget t : CalibrationTarget.currentTargets()) {
             h.append(",sim_").append(t.id).append(",resid_").append(t.id).append(",contrib_").append(t.id).append(",valid_").append(t.id).append(",invalid_reason_").append(t.id);
         }
-        h.append(",total_distance,outcome_status,failure_reason,runtime_ms,accepted");
+        h.append(",total_distance,outcome_status,failure_reason,fit_category,runtime_ms,accepted");
         return h.toString();
     }
 
@@ -398,8 +444,14 @@ public class ABCRejection {
         }
         b.append(',').append(fmt(r.distance == null ? Double.POSITIVE_INFINITY : r.distance.distance))
                 .append(',').append(csv(r.outcomeStatus)).append(',').append(csv(r.failureReason))
+                .append(',').append(csv(r.fitCategory))
                 .append(',').append(r.runtimeMillis).append(',').append(r.accepted);
         return b.toString();
+    }
+
+    static double csvDistance(String row) {
+        List<String> cols = CalibrationFreeze.parseCsv(row);
+        return parseDouble(cols.get(cols.size() - 6));
     }
 
     static DrawResult best(List<DrawResult> results) {
@@ -431,6 +483,7 @@ public class ABCRejection {
 
     static final class Summary {
         int totalDraws, validRuns, extinctionCount, invalidCount, exceptionCount, acceptanceCount;
+        int goodCount, borderlineCount, poorCount;
         double minDistance = Double.POSITIVE_INFINITY, medianDistance = Double.NaN, epsilon, acceptanceFraction;
     }
 
@@ -444,7 +497,10 @@ public class ABCRejection {
             else if ("TUMOR_EXTINCTION".equals(r.outcomeStatus)) s.extinctionCount++;
             else if ("MODEL_EXCEPTION".equals(r.outcomeStatus)) s.exceptionCount++;
             else s.invalidCount++;
-            if (r.distance != null && Double.isFinite(r.distance.distance)) finite.add(r.distance.distance);
+            if ("VALID_FINITE".equals(r.outcomeStatus) && r.distance != null && Double.isFinite(r.distance.distance)) finite.add(r.distance.distance);
+            if ("good".equals(r.fitCategory)) s.goodCount++;
+            else if ("borderline".equals(r.fitCategory)) s.borderlineCount++;
+            else if ("poor".equals(r.fitCategory)) s.poorCount++;
             if (r.accepted) s.acceptanceCount++;
         }
         finite.sort(Double::compare);
@@ -458,9 +514,10 @@ public class ABCRejection {
 
     static void writeDistanceSummary(Path file, Summary s) throws IOException {
         try (BufferedWriter w = Files.newBufferedWriter(file, StandardCharsets.UTF_8)) {
-            w.write("total_draws,valid_runs,extinction_count,invalid_count,exception_count,minimum_distance,median_distance,selected_epsilon,acceptance_count,acceptance_fraction\n");
+            w.write("total_draws,valid_runs,extinction_count,invalid_count,exception_count,good_count,borderline_count,poor_count,minimum_valid_distance,median_valid_distance,selected_threshold,acceptance_count,acceptance_fraction\n");
             w.write(s.totalDraws + "," + s.validRuns + "," + s.extinctionCount + "," + s.invalidCount + "," +
-                    s.exceptionCount + "," + fmt(s.minDistance) + "," + fmt(s.medianDistance) + "," +
+                    s.exceptionCount + "," + s.goodCount + "," + s.borderlineCount + "," + s.poorCount + "," +
+                    fmt(s.minDistance) + "," + fmt(s.medianDistance) + "," +
                     fmt(s.epsilon) + "," + s.acceptanceCount + "," + fmt(s.acceptanceFraction) + "\n");
         }
     }
@@ -481,8 +538,10 @@ public class ABCRejection {
         b.append("  \"target_profile\": \"current_abc_targets\",\n");
         b.append("  \"master_seed\": ").append(c.seed).append(",\n");
         b.append("  \"draws\": ").append(c.draws).append(",\n");
-        b.append("  \"epsilon_mode\": ").append(json(c.epsilon > 0.0 ? "fixed" : "quantile")).append(",\n");
+        b.append("  \"epsilon_mode\": ").append(json(!Double.isNaN(c.candidateThreshold) ? "absolute_candidate_threshold" : (c.epsilon > 0.0 ? "fixed" : "quantile"))).append(",\n");
         b.append("  \"epsilon\": ").append(fmt(c.epsilon)).append(",\n");
+        b.append("  \"candidate_threshold\": ").append(fmt(c.candidateThreshold)).append(",\n");
+        b.append("  \"good_threshold\": ").append(fmt(c.goodThreshold)).append(",\n");
         b.append("  \"selected_epsilon\": ").append(fmt(eps)).append(",\n");
         b.append("  \"quantile\": ").append(fmt(c.quantile)).append(",\n");
         b.append("  \"init_population\": ").append(c.initPop).append(",\n");
@@ -496,6 +555,10 @@ public class ABCRejection {
         b.append("  \"operating_system\": ").append(json(System.getProperty("os.name") + " " + System.getProperty("os.version"))).append(",\n");
         b.append("  \"target_hash\": ").append(json(targetHash)).append(",\n");
         b.append("  \"parameter_freeze_hash\": ").append(json(profileHash)).append(",\n");
+        b.append("  \"acceptance_logic\": ").append(json(!Double.isNaN(c.candidateThreshold)
+                ? "accept only VALID_FINITE runs with distance <= candidate_threshold; good <= good_threshold; borderline <= candidate_threshold; poor > candidate_threshold; invalid never accepted"
+                : "accept VALID_FINITE and other finite-distance runs by selected epsilon/quantile legacy rule")).append(",\n");
+        b.append("  \"invalid_run_rules\": ").append(json("MODEL_EXCEPTION, PARAMETER_VALIDATION_FAILURE, INITIALIZATION_FAILURE, TUMOR_EXTINCTION, STROMAL_COMPARTMENT_LOSS, INVALID_TARGET_STATISTIC, malformed/incomplete snapshots")).append(",\n");
         b.append("  \"source_hashes\": {\n");
         String[] files = {"OnLatticeExample/ExampleGrid.java", "OnLatticeExample/ModelParameters.java", "OnLatticeExample/ABCRejection.java", "OnLatticeExample/CalibrationProfile.java", "OnLatticeExample/CalibrationTarget.java"};
         for (int i = 0; i < files.length; i++) {
@@ -504,6 +567,85 @@ public class ABCRejection {
         b.append("  }\n");
         b.append("}\n");
         return b.toString();
+    }
+
+    static void writeRuntimeFreeze(Path file, Config c, CalibrationProfile profile, double selectedThreshold) throws Exception {
+        ModelParameters baseline = ModelParameters.currentBaseline(c.initPop);
+        StringBuilder b = new StringBuilder();
+        b.append("{\n");
+        b.append("  \"schema_version\": \"tnbc-abm-core2-diagnostic-freeze-v1\",\n");
+        b.append("  \"created_at_utc\": ").append(json(Instant.now().toString())).append(",\n");
+        b.append("  \"repository_commit\": ").append(json(CalibrationFreeze.git("rev-parse", "HEAD"))).append(",\n");
+        b.append("  \"working_tree_dirty\": ").append(!CalibrationFreeze.git("status", "--porcelain").isEmpty()).append(",\n");
+        b.append("  \"profile_name\": ").append(json(profile.name())).append(",\n");
+        b.append("  \"profile_description\": ").append(json(profile.description())).append(",\n");
+        b.append("  \"variable_parameters\": [\n");
+        for (int i = 0; i < profile.parameters().size(); i++) {
+            CalibrationProfile.Parameter p = profile.parameters().get(i);
+            b.append("    {\"name\": ").append(json(p.name))
+                    .append(", \"lower\": ").append(fmt(p.definition.lower))
+                    .append(", \"upper\": ").append(fmt(p.definition.upper))
+                    .append(", \"sampling\": ").append(json(p.priorDistribution))
+                    .append(", \"sampling_transform\": ").append(json(p.samplingTransform.name().toLowerCase(Locale.ROOT)))
+                    .append("}").append(i + 1 < profile.parameters().size() ? "," : "").append("\n");
+        }
+        b.append("  ],\n");
+        b.append("  \"frozen_parameters\": {\n");
+        int frozen = 0;
+        for (ModelParameters.Definition d : ModelParameters.screenedDefinitions()) if (!profile.includes(d.name)) frozen++;
+        int written = 0;
+        for (ModelParameters.Definition d : ModelParameters.screenedDefinitions()) {
+            if (profile.includes(d.name)) continue;
+            b.append("    ").append(json(d.name)).append(": ").append(fmt(baseline.get(d.name))).append(++written < frozen ? "," : "").append("\n");
+        }
+        b.append("  },\n");
+        b.append("  \"targets\": [\n");
+        for (int i = 0; i < CalibrationTarget.currentTargets().size(); i++) {
+            CalibrationTarget t = CalibrationTarget.currentTargets().get(i);
+            b.append("    {\"id\": ").append(json(t.id)).append(", \"type\": ").append(json(t.statisticType))
+                    .append(", \"step\": ").append(t.step)
+                    .append(", \"observed\": ").append(fmt(t.observedValue))
+                    .append(", \"weight\": ").append(fmt(t.weight))
+                    .append(", \"scale\": ").append(fmt(t.scale)).append("}")
+                    .append(i + 1 < CalibrationTarget.currentTargets().size() ? "," : "").append("\n");
+        }
+        b.append("  ],\n");
+        b.append("  \"snapshot_steps\": [0, 480, 960, 1440],\n");
+        b.append("  \"grid\": {\"width\": 100, \"height\": 100},\n");
+        b.append("  \"initialization\": {\"init_population\": ").append(c.initPop)
+                .append(", \"initial_jnk_positive_tenths\": ").append(baseline.initialJnkPositiveTenths)
+                .append(", \"initial_macrophage_count\": ").append(baseline.initialMacrophageCount)
+                .append(", \"initial_lung_count\": ").append(baseline.initialLungCount)
+                .append(", \"cluster_radius\": ").append(baseline.clusterRadius).append("},\n");
+        b.append("  \"random_seed_policy\": ").append(json("proposalSeed(master, drawId) and simulationSeed(master, drawId); one stochastic replicate per draw; fresh ExampleGrid and HAL Rand per draw")).append(",\n");
+        b.append("  \"master_seed\": ").append(c.seed).append(",\n");
+        b.append("  \"draws\": ").append(c.draws).append(",\n");
+        b.append("  \"max_step\": ").append(c.maxStep).append(",\n");
+        b.append("  \"distance_function\": ").append(json("sqrt(sum(weight * ((simulated - observed) / scale)^2))")).append(",\n");
+        b.append("  \"candidate_threshold\": ").append(fmt(c.candidateThreshold)).append(",\n");
+        b.append("  \"good_threshold\": ").append(fmt(c.goodThreshold)).append(",\n");
+        b.append("  \"selected_threshold\": ").append(fmt(selectedThreshold)).append(",\n");
+        b.append("  \"poor_fit_threshold\": 4.0,\n");
+        b.append("  \"acceptance_logic\": ").append(json("candidate iff VALID_FINITE and distance <= candidate_threshold; invalid/error/poor never accepted; no quantile minimum")).append(",\n");
+        b.append("  \"invalid_run_rules\": ").append(json("exceptions, validation failures, malformed/incomplete snapshots, non-finite target stats, final tumor extinction, EC/macrophage/fibroblast denominator loss where required")).append(",\n");
+        b.append("  \"coordinate_hashes\": {\"QuadratEndothelialOn.txt\": ").append(json(CalibrationFreeze.fileSha(Path.of("QuadratEndothelialOn.txt"))))
+                .append(", \"QuadratStrOn.txt\": ").append(json(CalibrationFreeze.fileSha(Path.of("QuadratStrOn.txt")))).append("},\n");
+        b.append("  \"profile_hash\": ").append(json(CalibrationFreeze.sha256(profile.canonicalCsv().getBytes(StandardCharsets.UTF_8)))).append(",\n");
+        b.append("  \"target_hash\": ").append(json(CalibrationFreeze.sha256(CalibrationTarget.canonicalCsv().getBytes(StandardCharsets.UTF_8)))).append("\n");
+        b.append("}\n");
+        Files.writeString(file, b.toString(), StandardCharsets.UTF_8);
+    }
+
+    static void writeFrozenParameterValues(Path file, CalibrationProfile profile, int initPop) throws IOException {
+        ModelParameters baseline = ModelParameters.currentBaseline(initPop);
+        try (BufferedWriter w = Files.newBufferedWriter(file, StandardCharsets.UTF_8)) {
+            w.write("profile,parameter,value,status,group,expected_outputs\n");
+            for (ModelParameters.Definition d : ModelParameters.screenedDefinitions()) {
+                if (profile.includes(d.name)) continue;
+                w.write(csv(profile.name()) + "," + csv(d.name) + "," + fmt(baseline.get(d.name)) + "," +
+                        csv(d.status) + "," + csv(d.group) + "," + csv(d.expectedOutputs) + "\n");
+            }
+        }
     }
 
     static long proposalSeed(long master, int drawId) {
