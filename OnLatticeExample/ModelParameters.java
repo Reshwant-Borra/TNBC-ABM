@@ -252,6 +252,10 @@ public final class ModelParameters {
         return value;
     }
 
+    public Map<String, Double> values() {
+        return values;
+    }
+
     public void validate() {
         List<String> errors = validationErrors();
         if (!errors.isEmpty()) throw new IllegalArgumentException(String.join("; ", errors));

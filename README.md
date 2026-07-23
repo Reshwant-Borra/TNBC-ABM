@@ -1,78 +1,170 @@
-# Standalone Java ABC (no Python wrapper)
+# TNBC ABM Calibration and Sensitivity Workflow
 
-A pure-Java rejection ABC for the TNBC lung-metastasis model, meant to be
-read and checked end to end. Two files:
+This repository contains a Java/HAL agent-based model of untreated TNBC lung metastasis and the supporting calibration/sensitivity infrastructure.
 
-- **`ExampleGrid.java`** — the agent-based model. New method **`RunHeadless(theta, initPop)`**
-  runs one simulation *in process* (no files) and returns the 5 snapshots.
-- **`ABCRejection.java`** — the ABC driver: priors, targets, distance, accept/reject.
+The current scientific state is:
 
-## What to check (the ABC logic lives entirely in `ABCRejection.java`)
+- The model is **not calibrated**.
+- The untreated Morris global sensitivity workflow is complete and preserved.
+- Phase 1 post-Morris calibration infrastructure is implemented.
+- The recommended first ABC pilot profile is `core4`, not the old 12-parameter workflow.
+- `legacy12` remains available for reproducibility and regression testing.
 
-1. **Priors** (`NAME`, `LO`, `HI`): 12 parameters, sampled `Uniform(LO,HI)`.
-   The order must match `ExampleGrid.RunHeadless`.
-2. **Targets** (`TT`,`TS`,`TV`,`TW`,`TSC`): the calibration data — a statistic
-   *type* at a snapshot *step*, its observed *value*, a *weight*, and a *scale*.
-3. **`stat(...)`**: how each summary statistic is computed from the snapshot
-   counts (fractions, or log10 fold-change vs the step-0 count).
-4. **`distance(...)`**: weighted, scaled Euclidean over the targets; `+infinity`
-   if any statistic is undefined (e.g. the tumour went extinct → auto-reject).
-5. **`main(...)`**: the four ABC steps — propose → simulate → compare → accept.
+## Model Entry Points
+
+- `OnLatticeExample.ExampleGrid`: TNBC ABM.
+- `ExampleGrid.RunHeadless(double[], initPop, maxStep)`: legacy 12-position parameter vector.
+- `ExampleGrid.RunHeadless(ModelParameters, maxStep)`: named parameter interface used by Morris and new calibration code.
+- `OnLatticeExample.ABCRejection`: rejection ABC driver.
+- `OnLatticeExample.MorrisSensitivitySweep`: resumable untreated Morris screen.
+- `OnLatticeExample.MorrisQualityControl`: existing Morris regression QC.
+- `OnLatticeExample.CalibrationQualityControl`: calibration profile/target/freeze QC.
+- `OnLatticeExample.CalibrationFreeze`: machine-readable freeze package generator.
+
+The model requires `QuadratEndothelialOn.txt` and `QuadratStrOn.txt` in the working directory.
+
+## Calibration Profiles
+
+### `core4`
+
+Initial post-Morris reduced profile:
+
+- `divProbP` sampled on log scale over `[0.005, 0.03]`
+- `pOffMax` sampled on log scale over `[0.01, 0.20]`
+- `divProbFP` sampled linearly over `[0.018, 0.038]`
+- `dieProbN` sampled on log scale over `[0.008, 0.025]`
+
+All other executable screened parameters are fixed at current `ModelParameters.currentBaseline(initPop)` values. Tier B fixed influential parameters are not inferred until mentor/literature review approves their ranges and parameterization.
+
+### `legacy12`
+
+Preserves the original ABC parameter names and order:
+
+```text
+netN, dieProbN, pOnMax, pOffMax, divProbP, dieProbP,
+cafDivBoost, ecSurvival, activProbF, divProbFP, activProbM, activProbE
+```
+
+This profile keeps the old physical-space uniform sampling behavior for compatibility. It is not the recommended scientific default.
 
 ## Build
 
-Both files declare `package OnLatticeExample;`, so keep them in an
-`OnLatticeExample/` folder and compile/run with the qualified name:
+macOS/Linux:
 
-
-```
-javac -cp HAL-freq.jar OnLatticeExample/ExampleGrid.java OnLatticeExample/ABCRejection.java
-```
-(If it can't find an `lwjgl` class at compile time, add it:
-`javac -cp "HAL-freq.jar:lwjgl.jar" OnLatticeExample/ExampleGrid.java OnLatticeExample/ABCRejection.java`.)
-
-## Run
-
-Needs the two static coordinate files in the working directory:
-`QuadratEndothelialOn.txt` and `QuadratStrOn.txt`.
-
-```
-java -cp .:HAL-freq.jar OnLatticeExample.ABCRejection [N] [epsilon] [quantile] [seed] [initPop]
+```bash
+javac -cp .:HAL-freq.jar:lwjgl.jar OnLatticeExample/*.java
 ```
 
-- `N` — number of prior draws (default 1000)
-- `epsilon` — fixed tolerance; use `-1` to instead keep the closest `quantile` (default -1)
-- `quantile` — if epsilon<0, fraction of finite runs to keep (default 0.2)
-- `seed` — RNG seed; the whole sweep is reproducible from it (default 12345)
-- `initPop` — seeded tumour cells (default 25)
+Windows PowerShell:
 
-Examples:
-```
-# pilot: 1000 draws, keep best 20%, learn the distance scale
-java -cp .:HAL-freq.jar OnLatticeExample.ABCRejection 1000 -1 0.2 12345 25
-
-# fixed tolerance once you know the scale
-java -cp .:HAL-freq.jar OnLatticeExample.ABCRejection 5000 1.0 0.2 42 25
+```powershell
+javac -cp ".;HAL-freq.jar;lwjgl.jar" OnLatticeExample\*.java
 ```
 
-## Output
+## Calibration QC
 
-- prints, per 25 runs, progress and seconds/run;
-- prints the finite-run count and the distance min / median / chosen epsilon;
-- writes **`posterior_java.csv`** — one row per accepted parameter set (the 12
-  parameters + its distance). Each row is a sample from the approximate posterior.
+macOS/Linux:
 
-## Notes / things a careful reader should question
+```bash
+java -cp .:HAL-freq.jar:lwjgl.jar OnLatticeExample.CalibrationQualityControl 9001 25 1440
+```
 
-- **Runtime is uneven.** A run whose tumour goes extinct finishes in seconds; one
-  that fills the grid is much slower. So wall-time is dominated by the big-tumour
-  draws — a 1000-run pilot can take a while.
-- **`epsilon` is not set a priori.** With `epsilon=-1` the code learns it as the
-  `quantile`-th distance of the finite runs. Look at `min`/`median` first, then
-  decide whether to pin a fixed epsilon.
-- **Fixed parameters** (not inferred here): `lambdaCAF=2.0`, `muStress=3.0`, all
-  migration and stromal basal rates. They keep the model's class defaults.
-- **Coordinate files** are re-read on every run inside `RunHeadless`; for speed you
-  could read them once and cache. Left simple on purpose.
-- This is deliberately the *simplest* ABC (rejection). SMC is more efficient but
-  harder to read; rejection is the right thing to hand someone to audit.
+Windows PowerShell:
+
+```powershell
+java -cp ".;HAL-freq.jar;lwjgl.jar" OnLatticeExample.CalibrationQualityControl 9001 25 1440
+```
+
+## Rejection ABC
+
+Flag-based CLI:
+
+```bash
+java -cp .:HAL-freq.jar:lwjgl.jar OnLatticeExample.ABCRejection \
+  --profile core4 \
+  --draws 100 \
+  --epsilon -1 \
+  --quantile 0.05 \
+  --seed 12345 \
+  --init-pop 25 \
+  --max-step 1440 \
+  --output-dir results/abc-core4-pilot-100
+```
+
+Supported flags:
+
+- `--profile core4|legacy12`
+- `--draws N`
+- `--epsilon X` (`-1` selects quantile mode)
+- `--quantile Q`
+- `--seed S`
+- `--init-pop N`
+- `--max-step N`
+- `--output-dir DIR`
+- `--dry-run`
+- `--resume`
+- `--force`
+
+Old positional syntax still works as a `legacy12` compatibility wrapper:
+
+```bash
+java -cp .:HAL-freq.jar:lwjgl.jar OnLatticeExample.ABCRejection 1000 -1 0.2 12345 25
+```
+
+ABC outputs are written under the selected output directory:
+
+- `run_manifest.json`
+- `resolved_config.json`
+- `abc_all_draws.csv`
+- `abc_accepted.csv`
+- `distance_summary.csv`
+- `best_run_target_breakdown.csv`
+
+The historical root-level `posterior_java.csv` is preserved but is no longer the default output target.
+
+## Freeze Package
+
+The Phase 1 freeze package is in `calibration/freeze/`:
+
+- `model_freeze.json`
+- `calibration_parameters.csv`
+- `calibration_targets.csv`
+- `fixed_parameter_snapshot.csv`
+- `README.md`
+
+Regenerate after intentional source/profile/target changes:
+
+```bash
+java -cp .:HAL-freq.jar:lwjgl.jar OnLatticeExample.CalibrationFreeze calibration/freeze
+```
+
+`ABCRejection` and `CalibrationQualityControl` verify the freeze hashes before execution.
+
+## Morris Screening
+
+The completed untreated Morris workflow is documented in:
+
+- `MORRIS_PIPELINE.md`
+- `MORRIS_EXECUTION_LOG.md`
+- `results/morris-pilot-10/`
+- `results/morris-primary-20/`
+- `results/morris-primary-20/FINAL_GLOBAL_SENSITIVITY_REPORT.md`
+- `results/morris-primary-20/FINAL_PARAMETER_DECISION_TABLE.csv`
+- `results/morris-primary-20/CONFIRMED_PARAMETER_EFFECTS.csv`
+
+Existing Morris QC:
+
+```bash
+java -Xmx3g -cp .:HAL-freq.jar:lwjgl.jar OnLatticeExample.MorrisQualityControl 9001 25 1440
+```
+
+Morris screening is not calibration. It supports the reduced pilot profile and identifies fixed parameters requiring review; it does not establish identifiability.
+
+## Phase 1 Documentation
+
+- `CALIBRATION_READINESS_AUDIT.md`: repository, ABC, target, Morris-to-calibration, and provenance audit.
+- `CALIBRATION_PHASE1_REPORT.md`: implemented changes, QC, smoke-test results, risks, and recommended first pilot.
+- `CALIBRATION_RUNBOOK.md`: verified macOS/Linux and Windows PowerShell commands.
+- `MENTOR_DECISIONS_REQUIRED.md`: biological/provenance questions that remain unresolved.
+
+Future work should proceed through a small `core4` ABC pilot, mentor review of Tier B fixed drivers, posterior predictive checks, and only then any larger ABC-SMC/SNPE or surrogate workflow.

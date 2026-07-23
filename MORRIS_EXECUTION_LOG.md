@@ -164,5 +164,60 @@ regressions. All QC **PASS**; 0 model exceptions. Prior smoke/dev results preser
 helper scripts added: `morris_stage_analysis.py`, `morris_rank_stability.py`, `morris_confirmation_analysis.py`,
 `morris_decision_table.py`.
 
+## Independent confirmatory Morris run (2026-07-22)
+
+Purpose: independent reproducibility check after calibration-readiness work. This run used new Morris
+trajectories and a new master seed; it did not rerun selected primary points.
+
+Model/source protection:
+
+- `git diff -- OnLatticeExample/ExampleGrid.java` was empty.
+- Current `ExampleGrid.java` SHA-256:
+  `0821b7fa4ab8dd3d8e213161d70ae3933ff706bfcf76d87a6b37020a831f0039`.
+- Recent calibration work changed `ABCRejection.java`, `ModelParameters.java`, `README.md`, and added
+  calibration profile/target/freeze/QC files; biological model logic was not changed for this run.
+
+Pre-run commands:
+
+```bash
+javac -cp .:HAL-freq.jar:lwjgl.jar OnLatticeExample/*.java
+java -Xmx3g -cp .:HAL-freq.jar:lwjgl.jar OnLatticeExample.MorrisQualityControl 9001 25 1440
+java -cp .:HAL-freq.jar:lwjgl.jar OnLatticeExample.CalibrationQualityControl 9001 25 1440
+```
+
+Outcomes: compile succeeded; both QC commands passed. Recompilation made Morris `.class` files newer than
+source, so stale compiled classes were not used.
+
+Smoke/resume:
+
+```bash
+java -cp .:HAL-freq.jar:lwjgl.jar OnLatticeExample.MorrisSensitivitySweep --trajectories 2 --levels 6 --threads 4 --master-seed 2026072201 --replicates 2 --init-pop 25 --max-steps 1440 --output-dir results/morris-independent-smoke-2x2
+java -cp .:HAL-freq.jar:lwjgl.jar OnLatticeExample.MorrisSensitivitySweep --trajectories 2 --levels 6 --threads 4 --master-seed 2026072201 --replicates 2 --init-pop 25 --max-steps 1440 --output-dir results/morris-independent-smoke-2x2 --resume
+```
+
+Outcome: smoke completed 184 simulations; resume reused 184 complete checkpoints and ran 0 simulations.
+New design seed was `-1836350308661608582`, different from primary design seed `6949820704716978156`.
+
+Full run:
+
+```bash
+java -Xmx10g -cp .:HAL-freq.jar:lwjgl.jar OnLatticeExample.MorrisSensitivitySweep --trajectories 20 --levels 6 --threads 8 --master-seed 2026072201 --replicates 5 --init-pop 25 --max-steps 1440 --output-dir results/morris-independent-confirm-20x5
+```
+
+Outcome: exit 0. Expected and recorded simulations: 4,600. Status counts: 1,963 FINITE, 1,687 INVALID,
+950 EXTINCT. QC PASS 11/11; 0 model-error status count. Design points: 920. Valid replicate-mean EEs:
+108,260; lost replicate-mean EEs: 6,040. Runtime sum across simulations: 13.245 CPU-hours.
+
+Analysis:
+
+```bash
+python3 analyze_morris.py --input-dir results/morris-independent-confirm-20x5 --output-dir results/morris-independent-confirm-20x5/figures --top-n 10
+python3 morris_stage_analysis.py --input-dir results/morris-independent-confirm-20x5 --prefix INDEPENDENT_ --top-n 10
+python3 morris_rank_stability.py --dir-a results/morris-primary-20 --dir-b results/morris-independent-confirm-20x5 --label-a primary20_1seed --label-b independent20_5seed --out-dir results/morris-independent-confirm-20x5
+```
+
+Old/new comparison: overall Spearman 0.823; top-5/10/15 overlap 0.60/0.90/0.80. Updated final
+recommendation written to `results/morris-independent-confirm-20x5/INDEPENDENT_CONFIRMATORY_MORRIS_REPORT.md`
+and `results/morris-independent-confirm-20x5/COMBINED_CALIBRATION_RECOMMENDATION.csv`.
 
 

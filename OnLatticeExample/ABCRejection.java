@@ -1,321 +1,570 @@
 package OnLatticeExample;
 
 import HAL.Rand;
-import java.io.FileWriter;
+
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.SplittableRandom;
 
 /**
- * ABCRejection — a standalone, pure-Java Approximate Bayesian Computation
- * (rejection sampler) for the TNBC lung-metastasis ABM (ExampleGrid).
+ * Rejection ABC driver for the untreated TNBC ABM.
  *
- * No Python wrapper, no parameter files: it samples parameter sets from the
- * priors, runs the model in-process (ExampleGrid.RunHeadless), reduces the
- * output to summary statistics, computes a distance to the calibration targets,
- * and keeps the sets whose distance is below a tolerance epsilon.
- *
- * The four steps of rejection ABC are all visible below:
- *   1. PROPOSE  - draw theta ~ Uniform(LO, HI)                 [main loop]
- *   2. SIMULATE - snaps = model.RunHeadless(theta)             [main loop]
- *   3. COMPARE  - d = distance(snaps) vs the targets           [distance()]
- *   4. ACCEPT   - keep theta if d <= epsilon                   [end of main]
- *
- * Build:  javac -cp HAL-freq.jar ExampleGrid.java ABCRejection.java
- * Run:    java  -cp .:HAL-freq.jar ABCRejection [N] [epsilon] [quantile] [seed] [initPop]
- *           N        : number of prior draws          (default 1000)
- *           epsilon  : fixed tolerance; <0 => use the quantile instead (default -1)
- *           quantile : if epsilon<0, keep the closest fraction         (default 0.2)
- *           seed     : RNG seed for reproducibility                    (default 12345)
- *           initPop  : seeded tumour cells                             (default 25)
- *         (QuadratEndothelialOn.txt and QuadratStrOn.txt must be in the working dir.)
- *
- * NOTE on runtime: each draw is a full 2900-step simulation; large tumours are
- * much slower than ones that go extinct, so a 1000-draw pilot can take a while.
+ * New flag-based runs use named calibration profiles and write all outputs under
+ * a run directory. Old positional arguments are accepted as a legacy12 wrapper:
+ *   ABCRejection [N] [epsilon] [quantile] [seed] [initPop]
  */
 public class ABCRejection {
+    static final String[] NAME = CalibrationProfile.legacy12().parameterNames().toArray(new String[0]);
+    static final double[] LO = legacyBounds(true);
+    static final double[] HI = legacyBounds(false);
+    static final String[] TT = targetTypes();
+    static final int[] TS = targetSteps();
+    static final double[] TV = targetValues();
+    static final double[] TW = targetWeights();
+    static final double[] TSC = targetScales();
+    static final int[] SNAP = CalibrationTarget.SNAP.clone();
 
-    // ================================================================
-    // 1) PRIORS — the 12 inferred parameters, Uniform(LO[i], HI[i]).
-    //    Order MUST match ExampleGrid.RunHeadless(theta).
-    // ================================================================
-    // Tumour rate STRUCTURE (biology):  JNK+ = LOW division + VERY LOW death (near-quiescent; grows only via CAF boost);
-    //                                   JNK- = HIGH division + HIGH death (grows fast; survives via EC death-reduction).
-    // NOTE: param[0] is netN (JNK- NET growth); divProbN = dieProbN + netN is computed in RunHeadless,
-    //       so the growth-curve-constrained net is inferred directly (identifiable, always net-positive).
-    static final String[] NAME = {
-        "netN","dieProbN","pOnMax","pOffMax","divProbP","dieProbP",
-        "cafDivBoost","ecSurvival","activProbF","divProbFP","activProbM","activProbE"
-    };
-    static final double[] LO = {0.0015, 0.008, 0.01, 0.01, 0.005, 0.001, 0.0, 0.0, 0.001, 0.018, 0.02,  0.005};
-    static int bestMacTry = 0, bestMacFail = 0;  // crowding read for the best run
-    static final double[] HI = {0.005, 0.025, 0.10, 0.20, 0.03, 0.004, 1.0, 0.3, 0.05,  0.038, 0.08,  0.08};
+    static int bestMacTry = 0, bestMacFail = 0;
 
-    // ================================================================
-    // 2) TARGETS — the calibration data (see the project's abc_config.yaml).
-    //    Each target: a summary-statistic TYPE at a snapshot STEP, its observed
-    //    VALUE, a WEIGHT, and a SCALE that normalises the residual.
-    //      jnkp  = JNK+ tumour fraction        [flow: IR18]        (intensive)
-    //      ec    = activated-EC fraction        [H22 Fig.1b]        (intensive)
-    //      mac   = ACTIVATED macrophage fraction  [H22 Fig.6e] -- PROXY for the
-    //              paper's perivascular fraction; the model biases activated-mac
-    //              migration toward ECs, so activated ~ perivascular (see note in README).
-    //      fibro = log10 fibroblast fold vs t0  [P20 Fig.1f]  (2D-adjusted)
-    //      tumor = log10 tumour fold vs t0      [MDA231-LM2 biolum] (2D-adjusted)
-    //
-    //    2D DIMENSIONAL ADJUSTMENT (fold-change targets only):
-    //      The ABM is a 2D areal lattice. tumor (bioluminescence ~ volume) and
-    //      fibro (whole-lung count ~ tumour burden) are 3D/volumetric measures.
-    //      For isotropic compact growth  fold_2D = fold_3D^(2/3), i.e. in log10
-    //      value_2D = value_3D * 2/3:
-    //        fibro 1440: 1.65 -> 1.10 ;  tumor 480/960/1440:
-    //        0.63->0.42, 1.17->0.78, 1.66->1.11.
-    //      Day-30 (step 2100) tumour target DROPPED: it lay beyond the growth-
-    //      curve data window (all targets end at day 21 = step 1440). The model
-    //      still runs to 2900 for chemo, so SNAP keeps step 2100; it is simply
-    //      no longer a target (its snapshot is produced but not scored).
-    //      Fractions (jnkp, ec, mac) are intensive ratios -> NOT converted.
-    //      Fold scales rescaled 0.4 -> 0.27 (x2/3) to preserve relative tolerance
-    //      (revert to 0.4 for the original absolute tolerance). Fibroblast exponent
-    //      2/3 assumes volume-scaling; for a fixed-thickness shell use 1/2 -> 0.83.
-    //      (Keep TV/TSC identical to config/abc_config.yaml in the SMC project.)
-    // ================================================================
-    static final String[] TT  = {"jnkp","jnkp","ec",  "ec",  "ec",  "mac", "fibro","tumor","tumor","tumor"};
-    static final int[]    TS  = { 480,   1440,  480,   960,   1440,  1440,  1440,   480,    960,    1440 };
-    static final double[] TV  = { 0.53,  0.14,  0.15,  0.30,  0.80,  0.77,  1.10,   0.42,   0.78,   1.11 };
-    static final double[] TW  = { 1.0,   1.0,   0.5,   0.5,   1.0,   1.0,   1.0,    1.0,    1.0,    1.0  };
-    static final double[] TSC = { 0.2,   0.2,   0.2,   0.2,   0.2,   0.2,   0.27,   0.27,   0.27,   0.27 };
-
-    static final int[] SNAP = {0, 480, 960, 1440};   // snapshot step order (calibration horizon = day 21)
-    static int snapIdx(int step) { for (int i=0;i<SNAP.length;i++) if (SNAP[i]==step) return i; return -1; }
-
-    // ----------------------------------------------------------------
-    // One summary statistic from the snapshots (int[5][8]).
-    // snapshot row = {tumJNKp,tumJNKn,ecAct,ecInact,macAct,macInact,fibAct,fibInact}
-    // Returns NaN if undefined (e.g. no cells of that type -> extinction).
-    // ----------------------------------------------------------------
-    static double stat(int[][] s, String type, int step) {
-        int[] c = s[snapIdx(step)];
-        int tumP=c[0], tumN=c[1], ecA=c[2], ecI=c[3], macA=c[4], macI=c[5], fibA=c[6], fibI=c[7];
-        switch (type) {
-            case "jnkp":  { int t=tumP+tumN; return t>0 ? (double)tumP/t : Double.NaN; }
-            case "ec":    { int t=ecA+ecI;   return t>0 ? (double)ecA /t : Double.NaN; }
-            case "mac":   { int t=macA+macI; return t>0 ? (double)macA/t : Double.NaN; }
-            case "fibro": { int t0=s[0][6]+s[0][7], t=fibA+fibI; return (t0>0&&t>0)? Math.log10((double)t/t0):Double.NaN; }
-            case "tumor": { int t0=s[0][0]+s[0][1], t=tumP+tumN; return (t0>0&&t>0)? Math.log10((double)t/t0):Double.NaN; }
-            default: return Double.NaN;
+    static double[] legacyBounds(boolean lower) {
+        CalibrationProfile legacy = CalibrationProfile.legacy12();
+        double[] out = new double[legacy.parameters().size()];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = lower ? legacy.parameters().get(i).definition.lower : legacy.parameters().get(i).definition.upper;
         }
+        return out;
     }
 
-    // ----------------------------------------------------------------
-    // 3) DISTANCE — weighted, scaled Euclidean over all targets.
-    //    Returns +infinity if any target is undefined (degenerate run),
-    //    which guarantees such a run is rejected.
-    // ----------------------------------------------------------------
-    static double distance(int[][] s) {
-        if (s.length != SNAP.length)
-            throw new IllegalArgumentException("expected " + SNAP.length + " snapshots, got " + s.length);
-        // Genuine tumour extinction (no tumour cells at the final snapshot) -> reject.
-        if (s[SNAP.length-1][0] + s[SNAP.length-1][1] == 0) return Double.POSITIVE_INFINITY;
-        double sum = 0.0;
-        for (int j=0; j<TT.length; j++) {
-            double sim = stat(s, TT[j], TS[j]);
-            double resid;
-            if (Double.isNaN(sim)) {
-                // A stromal compartment was squeezed to zero by an OVER-GROWN tumour
-                // (grid saturation), NOT extinction. Apply a large but finite penalty so
-                // the run is rejected and visible, instead of mislabelled as extinct.
-                resid = 3.0;
-            } else {
-                resid = (sim - TV[j]) / TSC[j];
+    static String[] targetTypes() {
+        List<CalibrationTarget> t = CalibrationTarget.currentTargets();
+        String[] out = new String[t.size()];
+        for (int i = 0; i < out.length; i++) out[i] = t.get(i).statisticType;
+        return out;
+    }
+    static int[] targetSteps() {
+        List<CalibrationTarget> t = CalibrationTarget.currentTargets();
+        int[] out = new int[t.size()];
+        for (int i = 0; i < out.length; i++) out[i] = t.get(i).step;
+        return out;
+    }
+    static double[] targetValues() {
+        List<CalibrationTarget> t = CalibrationTarget.currentTargets();
+        double[] out = new double[t.size()];
+        for (int i = 0; i < out.length; i++) out[i] = t.get(i).observedValue;
+        return out;
+    }
+    static double[] targetWeights() {
+        List<CalibrationTarget> t = CalibrationTarget.currentTargets();
+        double[] out = new double[t.size()];
+        for (int i = 0; i < out.length; i++) out[i] = t.get(i).weight;
+        return out;
+    }
+    static double[] targetScales() {
+        List<CalibrationTarget> t = CalibrationTarget.currentTargets();
+        double[] out = new double[t.size()];
+        for (int i = 0; i < out.length; i++) out[i] = t.get(i).scale;
+        return out;
+    }
+
+    static int snapIdx(int step) { return CalibrationTarget.snapIdx(step); }
+    static double stat(int[][] s, String type, int step) { return CalibrationTarget.stat(s, type, step); }
+    static double distance(int[][] s) { return CalibrationTarget.distance(s).distance; }
+
+    static final class Config {
+        String profileName = "core4";
+        int draws = 1000;
+        double epsilon = -1.0;
+        double quantile = 0.05;
+        long seed = 12345L;
+        int initPop = 25;
+        int maxStep = 1440;
+        Path outputDir = null;
+        boolean dryRun = false, resume = false, force = false, legacyPositional = false;
+
+        static Config parse(String[] args) {
+            Config c = new Config();
+            if (args.length > 0 && !args[0].startsWith("--")) {
+                c.legacyPositional = true;
+                c.profileName = "legacy12";
+                c.draws = args.length > 0 ? Integer.parseInt(args[0]) : 1000;
+                c.epsilon = args.length > 1 ? Double.parseDouble(args[1]) : -1.0;
+                c.quantile = args.length > 2 ? Double.parseDouble(args[2]) : 0.2;
+                c.seed = args.length > 3 ? Long.parseLong(args[3]) : 12345L;
+                c.initPop = args.length > 4 ? Integer.parseInt(args[4]) : 25;
+                if (args.length > 5) throw new IllegalArgumentException("legacy positional mode accepts at most five arguments");
+                return c.validate();
             }
-            sum += TW[j] * resid * resid;
+            for (int i = 0; i < args.length; i++) {
+                String a = args[i];
+                if ("--dry-run".equals(a)) { c.dryRun = true; continue; }
+                if ("--resume".equals(a)) { c.resume = true; continue; }
+                if ("--force".equals(a)) { c.force = true; continue; }
+                if (i + 1 >= args.length) throw new IllegalArgumentException("missing value after " + a);
+                String v = args[++i];
+                switch (a) {
+                    case "--profile": c.profileName = v; break;
+                    case "--draws": c.draws = Integer.parseInt(v); break;
+                    case "--epsilon": c.epsilon = Double.parseDouble(v); break;
+                    case "--quantile": c.quantile = Double.parseDouble(v); break;
+                    case "--seed": c.seed = Long.parseLong(v); break;
+                    case "--init-pop": c.initPop = Integer.parseInt(v); break;
+                    case "--max-step": c.maxStep = Integer.parseInt(v); break;
+                    case "--output-dir": c.outputDir = Path.of(v); break;
+                    default: throw new IllegalArgumentException("unknown option: " + a);
+                }
+            }
+            return c.validate();
         }
-        return Math.sqrt(sum);
+
+        Config validate() {
+            CalibrationProfile.byName(profileName).validate();
+            if (draws < 1) throw new IllegalArgumentException("--draws must be positive");
+            if (!Double.isFinite(epsilon)) throw new IllegalArgumentException("--epsilon must be finite; use -1 for quantile mode");
+            if (!(quantile > 0.0 && quantile <= 1.0)) throw new IllegalArgumentException("--quantile must be in (0,1]");
+            if (initPop < 1) throw new IllegalArgumentException("--init-pop must be positive");
+            if (maxStep < 0) throw new IllegalArgumentException("--max-step must be nonnegative");
+            if (maxStep < 1440) throw new IllegalArgumentException("--max-step must reach all current targets (1440)");
+            if (outputDir == null) outputDir = Path.of("results", "abc-" + profileName + "-" + timestamp());
+            return this;
+        }
     }
 
-    // ----------------------------------------------------------------
-    // Per-target residual breakdown for one run's snapshots.
-    // Prints each target's sim vs target and its contribution to d^2
-    // ( contrib_j = weight_j * ((sim_j - target_j)/scale_j)^2 ), sorted
-    // worst-first, plus each target's share of d^2. Diffuse (many small
-    // shares) => target tension; one dominant share => a broken mechanism.
-    // ----------------------------------------------------------------
-    static void printBreakdown(int[][] s, int[][] rimCore, double dist) {
-        int m = TT.length;
-        double[]  sims    = new double[m];
-        double[]  contrib = new double[m];
-        Integer[] order   = new Integer[m];
-        for (int j = 0; j < m; j++) {
-            double sim = stat(s, TT[j], TS[j]);
-            sims[j] = sim;
-            double resid = (sim - TV[j]) / TSC[j];
-            contrib[j] = TW[j] * resid * resid;
-            order[j] = j;
-        }
-        Arrays.sort(order, (a, b) -> Double.compare(contrib[b], contrib[a]));  // worst first
-        double d2 = dist * dist;
-        System.out.printf("%n--- best run: per-target breakdown  (d = %.3f, d^2 = %.3f) ---%n", dist, d2);
-        System.out.printf("  %-16s %8s %8s %6s %6s %10s  %6s%n",
-                "target@step", "sim", "target", "wt", "scale", "contrib", "share");
-        for (int k = 0; k < m; k++) {
-            int j = order[k];
-            double share = (d2 > 0) ? 100.0 * contrib[j] / d2 : 0.0;
-            System.out.printf("  %-16s %8.3f %8.3f %6.2f %6.2f %10.3f  %5.1f%%%n",
-                    TT[j] + "@" + TS[j], sims[j], TV[j], TW[j], TSC[j], contrib[j], share);
-        }
-        System.out.println("  (contrib = weight * ((sim-target)/scale)^2 ;  sum of contrib = d^2)");
-
-        // spatial / cell-count diagnostics for the same best run
-        System.out.printf("%n--- best run: JNK+ location & macrophage counts (per snapshot) ---%n");
-        System.out.printf("  %-6s %8s %8s %9s %9s %8s %8s%n",
-                "step", "tumP", "tumN", "jnk+rim", "jnk+core", "macAct", "macIn");
-        for (int k = 0; k < SNAP.length && k < s.length; k++) {
-            int[] c = s[k];
-            int rimc  = (rimCore != null && k < rimCore.length) ? rimCore[k][0] : -1;
-            int corec = (rimCore != null && k < rimCore.length) ? rimCore[k][1] : -1;
-            System.out.printf("  %-6d %8d %8d %9d %9d %8d %8d%n",
-                    SNAP[k], c[0], c[1], rimc, corec, c[4], c[5]);
-        }
-        System.out.println("  jnk+rim = JNK+ cells with an exposed (empty/non-tumour) neighbour; jnk+core = buried.");
-        System.out.println("  macAct  = activated macrophages (the mac-stat numerator). ~0 across all steps => macs never activate.");
-        System.out.printf("  activated-mac division crowding: %d/%d attempts blocked for no space (%.0f%%)%n",
-                bestMacFail, bestMacTry, bestMacTry > 0 ? 100.0*bestMacFail/bestMacTry : 0.0);
+    static final class DrawResult {
+        int drawId;
+        long proposalSeed, simulationSeed, runtimeMillis;
+        ModelParameters parameters;
+        int[][] snapshots = new int[0][];
+        int[][] rimCore = new int[0][];
+        int[][] eventCounts = new int[0][];
+        double[][] spatialMetrics = new double[0][];
+        CalibrationTarget.DistanceResult distance;
+        String outcomeStatus = "";
+        String failureReason = "";
+        String errorClass = "";
+        String errorMessage = "";
+        boolean accepted;
+        String existingCsvRow;
     }
 
-    // ================================================================
-    // MAIN — the rejection loop.
-    // ================================================================
-    public static void main(String[] args) throws IOException {
-        int    N        = args.length > 0 ? Integer.parseInt(args[0]) : 1000;
-        double epsilon  = args.length > 1 ? Double.parseDouble(args[1]) : -1.0;   // <0 => quantile
-        double quantile = args.length > 2 ? Double.parseDouble(args[2]) : 0.2;
-        long   seed     = args.length > 3 ? Long.parseLong(args[3]) : 12345L;
-        int    initPop  = args.length > 4 ? Integer.parseInt(args[4]) : 25;
-
-        // pre-flight: the model reads these every run; fail fast with a clear message
+    public static void main(String[] args) throws Exception {
+        Config c = Config.parse(args);
         for (String req : new String[]{"QuadratEndothelialOn.txt", "QuadratStrOn.txt"}) {
-            if (!new java.io.File(req).exists()) {
-                System.err.println("ERROR: required input not found in working dir: " + req
-                        + "\n  Run from the directory that contains the Quadrat*.txt coordinate files.");
-                return;
+            if (!Files.isRegularFile(Path.of(req))) {
+                throw new IOException("required input not found in working dir: " + req);
             }
         }
+        CalibrationTarget.validateTargets();
+        CalibrationFreeze.verifyFreeze(CalibrationFreeze.DEFAULT_DIR);
+        CalibrationProfile profile = CalibrationProfile.byName(c.profileName);
+        prepareOutputDir(c, profile);
 
-        Rand rng = new Rand(seed);
-        double[][] thetas = new double[N][NAME.length];
-        double[]   dists  = new double[N];
-        double[][] simOut = new double[N][TT.length];   // simulated value of each of the 10 target statistics per run
-        int        nErr   = 0;   // runs that threw (bug/setup), distinct from extinction
-        double     bestDist  = Double.POSITIVE_INFINITY;
-        int[][]    bestSnaps = null;   // snapshots of the lowest-distance finite run (for the breakdown)
-        int[][]    bestRimCore = null; // {rim,core} JNK+ counts of that same run
-        java.util.ArrayList<int[]> extinctTraj = new java.util.ArrayList<>(); // tumour totals/snapshot for extinct runs
-
-        System.out.println("ABC rejection | " + N + " draws | " + NAME.length
-                + " params | " + TT.length + " targets | seed " + seed);
-
-        long t0 = System.currentTimeMillis();
-        for (int n = 0; n < N; n++) {
-            // 1) PROPOSE: theta ~ Uniform(LO, HI)
-            double[] th = new double[NAME.length];
-            for (int p = 0; p < NAME.length; p++) th[p] = LO[p] + rng.Double() * (HI[p] - LO[p]);
-            thetas[n] = th;
-
-            // 2) SIMULATE: fresh grid, per-run seed (so the whole sweep is reproducible)
-            try {
-                ExampleGrid model = new ExampleGrid(100, 100);
-                model.rng = new Rand(seed + 1_000L + n);
-                int[][] snaps = model.RunHeadless(th, initPop);
-                // 3) COMPARE
-                dists[n] = distance(snaps);
-                for (int j = 0; j < TT.length; j++) simOut[n][j] = stat(snaps, TT[j], TS[j]);
-                if (Double.isFinite(dists[n]) && dists[n] < bestDist) {  // remember best run's snapshots
-                    bestDist    = dists[n];
-                    bestSnaps   = snaps;
-                    bestRimCore = model.lastRimCore;
-                    bestMacTry  = model.macDivTry;
-                    bestMacFail = model.macDivFail;
-                }
-                if (!Double.isFinite(dists[n])) {   // extinction: record tumour trajectory (JNK+ + JNK-)
-                    int[] tr = new int[SNAP.length];
-                    for (int i = 0; i < SNAP.length; i++) tr[i] = snaps[i][0] + snaps[i][1];
-                    extinctTraj.add(tr);
-                }
-            } catch (Exception e) {
-                dists[n] = Double.POSITIVE_INFINITY;   // an ERROR (not extinction) -> rejected
-                nErr++;
-                if (nErr <= 5) {                       // surface the first few for debugging
-                    System.err.println("run " + n + " threw "
-                            + e.getClass().getSimpleName() + ": " + e.getMessage());
-                    e.printStackTrace();
-                }
-            }
-
-            if ((n + 1) % 25 == 0) {
-                double secs = (System.currentTimeMillis() - t0) / 1000.0;
-                System.out.printf("  %d/%d done  (%.0f s, %.2f s/run)%n", n+1, N, secs, secs/(n+1));
-            }
-        }
-
-        // ---- distance distribution + choose epsilon ----
-        double[] finite = Arrays.stream(dists).filter(Double::isFinite).sorted().toArray();
-        int nFin = finite.length;
-        System.out.println("\nfinite runs: " + nFin + "/" + N
-                + "   (rejected: " + (N - nFin) + " total; of those " + nErr + " ERRORED, "
-                + ((N - nFin) - nErr) + " went extinct)");
-        if (nErr > 0) {
-            System.out.println("WARNING: " + nErr + " run(s) threw an exception - a bug or "
-                    + "missing/short input, NOT biological extinction. See the traces above.");
-        }
-        if (!extinctTraj.isEmpty()) {
-            int neverEst = 0, grewCrashed = 0;
-            for (int[] tr : extinctTraj) { int pk=0; for (int v: tr) pk=Math.max(pk,v);
-                if (pk < 40) neverEst++; else grewCrashed++; }
-            System.out.printf("%n--- extinction diagnostic (%d extinct runs) ---%n", extinctTraj.size());
-            System.out.printf("  never established (peak tumour < 40 cells): %d%n", neverEst);
-            System.out.printf("  grew then crashed (peak >= 40 cells):       %d%n", grewCrashed);
-            System.out.println("  first extinct runs, tumour total per snapshot {0,480,960,1440}:");
-            for (int k = 0; k < Math.min(12, extinctTraj.size()); k++) {
-                int[] tr = extinctTraj.get(k);
-                System.out.printf("    %2d:  %5d -> %5d -> %5d -> %5d%n", k, tr[0], tr[1], tr[2], tr[3]);
-            }
-        }
-        if (nFin == 0) {
-            if (nErr == N) System.out.println("Every run ERRORED (see traces) - fix the setup, not the priors.");
-            else           System.out.println("Every run went extinct - the prior region kills the tumour; widen/shift priors.");
+        System.out.printf(Locale.US, "ABC rejection | profile=%s | draws=%d | targets=%d | seed=%d | output=%s%n",
+                profile.name(), c.draws, CalibrationTarget.currentTargets().size(), c.seed, c.outputDir);
+        if (c.dryRun) {
+            writeManifest(c, profile, "DRY_RUN", 0, 0, Double.NaN, 0);
+            System.out.println("dry run complete: configuration validated and manifest written");
             return;
         }
-        double dmin = finite[0], dmed = finite[nFin/2];
-        // keep the closest ~quantile fraction: choose the COUNT, then take the
-        // count-th smallest distance as epsilon (inclusive <= keeps exactly `keep`).
-        int    keep = Math.max(1, (int)Math.round(quantile * nFin));   // at least 1
-        double eps  = (epsilon > 0) ? epsilon : finite[Math.min(nFin - 1, keep - 1)];
-        System.out.printf("distance:  min=%.3f  median=%.3f%n", dmin, dmed);
-        System.out.printf("epsilon:   %.3f   (%s)%n", eps,
-                (epsilon > 0) ? "fixed" : ("quantile q=" + quantile));
 
-        // per-target breakdown of the best-scoring run: which targets dominate the distance?
-        if (bestSnaps != null) printBreakdown(bestSnaps, bestRimCore, bestDist);
-
-        // ---- 4) ACCEPT: keep theta with distance <= epsilon, write posterior ----
-        FileWriter w = new FileWriter("posterior_java.csv");
-        StringBuilder hdr = new StringBuilder(String.join(",", NAME));
-        for (int j = 0; j < TT.length; j++) hdr.append(",out_").append(TT[j]).append("_").append(TS[j]);
-        hdr.append(",distance");
-        w.write(hdr + "\n");
-        int nAcc = 0;
-        for (int n = 0; n < N; n++) {
-            if (Double.isFinite(dists[n]) && dists[n] <= eps) {
-                StringBuilder sb = new StringBuilder();
-                for (double v : thetas[n]) sb.append(v).append(",");
-                for (double v : simOut[n]) sb.append(v).append(",");
-                sb.append(dists[n]);
-                w.write(sb.toString() + "\n");
-                nAcc++;
+        Map<Integer, String> resumedRows = c.resume ? readCompletedRows(c.outputDir.resolve("abc_all_draws.csv")) : Collections.emptyMap();
+        List<DrawResult> results = new ArrayList<>();
+        long start = System.currentTimeMillis();
+        for (int n = 0; n < c.draws; n++) {
+            if (resumedRows.containsKey(n)) {
+                DrawResult r = new DrawResult();
+                r.drawId = n;
+                r.existingCsvRow = resumedRows.get(n);
+                hydrateExisting(r);
+                results.add(r);
+                continue;
+            }
+            DrawResult r = runDraw(c, profile, n);
+            results.add(r);
+            if ((n + 1) % 25 == 0) {
+                double secs = (System.currentTimeMillis() - start) / 1000.0;
+                System.out.printf(Locale.US, "  %d/%d done (%.0f s, %.2f s/draw)%n", n + 1, c.draws, secs, secs / (n + 1));
             }
         }
-        w.close();
-        System.out.println("accepted " + nAcc + " parameter set(s)  ->  posterior_java.csv");
-        System.out.println("(each accepted row is a sample from the approximate posterior)");
+
+        double eps = selectEpsilon(c, results);
+        for (DrawResult r : results) {
+            if (r.existingCsvRow == null && r.distance != null) r.accepted = Double.isFinite(r.distance.distance) && r.distance.distance <= eps;
+        }
+        writeAllOutputs(c, profile, results, eps);
+        Summary s = summarize(results, eps);
+        writeManifest(c, profile, "COMPLETE", s.validRuns, s.acceptanceCount, eps, System.currentTimeMillis() - start);
+        System.out.printf(Locale.US, "accepted %d/%d draws (epsilon %.6g) -> %s%n", s.acceptanceCount, c.draws, eps, c.outputDir.resolve("abc_accepted.csv"));
+    }
+
+    static DrawResult runDraw(Config c, CalibrationProfile profile, int drawId) {
+        DrawResult r = new DrawResult();
+        r.drawId = drawId;
+        r.proposalSeed = proposalSeed(c.seed, drawId);
+        r.simulationSeed = simulationSeed(c.seed, drawId);
+        long t0 = System.nanoTime();
+        try {
+            r.parameters = profile.propose(r.proposalSeed, c.initPop);
+            ExampleGrid model = new ExampleGrid(100, 100);
+            model.rng = new Rand(r.simulationSeed);
+            r.snapshots = model.RunHeadless(r.parameters, c.maxStep);
+            r.rimCore = deepCopy(model.lastRimCore);
+            r.eventCounts = deepCopy(model.lastEventCounts);
+            r.spatialMetrics = deepCopy(model.lastSpatialMetrics);
+            if (r.snapshots.length == 0 || r.snapshots[0].length < 2 || r.snapshots[0][0] + r.snapshots[0][1] != c.initPop) {
+                r.outcomeStatus = "INITIALIZATION_FAILURE";
+                r.failureReason = "initial tumour count did not equal initPop";
+                r.distance = new CalibrationTarget.DistanceResult(Double.POSITIVE_INFINITY,
+                        CalibrationTarget.perTarget(safeSnapshots(r.snapshots)), "INITIALIZATION_FAILURE");
+            } else {
+                r.distance = CalibrationTarget.distance(r.snapshots);
+                classify(r);
+            }
+        } catch (IllegalArgumentException e) {
+            r.outcomeStatus = "PARAMETER_VALIDATION_FAILURE";
+            r.failureReason = e.getMessage();
+            r.errorClass = e.getClass().getName();
+            r.errorMessage = e.getMessage();
+            r.distance = new CalibrationTarget.DistanceResult(Double.POSITIVE_INFINITY, Collections.emptyList(), r.outcomeStatus);
+        } catch (Throwable e) {
+            r.outcomeStatus = "MODEL_EXCEPTION";
+            r.failureReason = e.getMessage() == null ? e.toString() : e.getMessage();
+            r.errorClass = e.getClass().getName();
+            r.errorMessage = e.getMessage() == null ? e.toString() : e.getMessage();
+            r.distance = new CalibrationTarget.DistanceResult(Double.POSITIVE_INFINITY, Collections.emptyList(), r.outcomeStatus);
+        } finally {
+            r.runtimeMillis = (System.nanoTime() - t0) / 1_000_000L;
+        }
+        return r;
+    }
+
+    static void classify(DrawResult r) {
+        if (!Double.isFinite(r.distance.distance) && "TUMOR_EXTINCTION".equals(r.distance.statusHint)) {
+            r.outcomeStatus = "TUMOR_EXTINCTION";
+            r.failureReason = "final tumour denominator is zero";
+            return;
+        }
+        boolean ec = false, mac = false, fib = false, other = false;
+        for (CalibrationTarget.TargetResult tr : r.distance.targets) if (!tr.valid) {
+            if ("EC_POPULATION_ZERO".equals(tr.invalidReason)) ec = true;
+            else if ("MACROPHAGE_POPULATION_ZERO".equals(tr.invalidReason)) mac = true;
+            else if ("FIBROBLAST_POPULATION_ZERO".equals(tr.invalidReason)) fib = true;
+            else other = true;
+        }
+        if (ec || mac || fib) {
+            r.outcomeStatus = "STROMAL_COMPARTMENT_LOSS";
+            ArrayList<String> reasons = new ArrayList<>();
+            if (ec) reasons.add("EC_POPULATION_ZERO");
+            if (mac) reasons.add("MACROPHAGE_POPULATION_ZERO");
+            if (fib) reasons.add("FIBROBLAST_POPULATION_ZERO");
+            r.failureReason = String.join(";", reasons);
+        } else if (other) {
+            r.outcomeStatus = "INVALID_TARGET_STATISTIC";
+            r.failureReason = "one or more target statistics undefined";
+        } else {
+            r.outcomeStatus = "VALID_FINITE";
+            r.failureReason = "";
+        }
+    }
+
+    static int[][] safeSnapshots(int[][] s) {
+        return (s != null && s.length == CalibrationTarget.SNAP.length) ? s : new int[][]{{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0}};
+    }
+
+    static double selectEpsilon(Config c, List<DrawResult> results) {
+        if (c.epsilon > 0.0) return c.epsilon;
+        ArrayList<Double> finite = new ArrayList<>();
+        for (DrawResult r : results) if (r.distance != null && Double.isFinite(r.distance.distance)) finite.add(r.distance.distance);
+        if (finite.isEmpty()) return Double.POSITIVE_INFINITY;
+        finite.sort(Double::compare);
+        int keep = Math.max(1, (int) Math.round(c.quantile * finite.size()));
+        return finite.get(Math.min(finite.size() - 1, keep - 1));
+    }
+
+    static void prepareOutputDir(Config c, CalibrationProfile profile) throws Exception {
+        if (Files.exists(c.outputDir)) {
+            boolean empty = isEmpty(c.outputDir);
+            if (!empty && !c.resume && !c.force) {
+                throw new IOException("refusing to write into nonempty output directory without --resume or --force: " + c.outputDir);
+            }
+            if (c.resume) {
+                Path manifest = c.outputDir.resolve("run_manifest.json");
+                if (!Files.isRegularFile(manifest)) throw new IOException("--resume requires existing run_manifest.json");
+                String text = Files.readString(manifest, StandardCharsets.UTF_8);
+                require(text.contains("\"profile\": \"" + profile.name() + "\""), "resume profile mismatch");
+                require(text.contains("\"master_seed\": " + c.seed), "resume seed mismatch");
+                require(text.contains("\"draws\": " + c.draws), "resume draws mismatch");
+                require(text.contains("\"init_population\": " + c.initPop), "resume initPop mismatch");
+                require(text.contains("\"max_step\": " + c.maxStep), "resume maxStep mismatch");
+            }
+        }
+        Files.createDirectories(c.outputDir);
+    }
+
+    static boolean isEmpty(Path dir) throws IOException {
+        if (!Files.isDirectory(dir)) return true;
+        try (DirectoryStream<Path> ds = Files.newDirectoryStream(dir)) {
+            return !ds.iterator().hasNext();
+        }
+    }
+
+    static Map<Integer, String> readCompletedRows(Path csv) throws IOException {
+        HashMap<Integer, String> out = new HashMap<>();
+        if (!Files.isRegularFile(csv)) return out;
+        try (BufferedReader r = Files.newBufferedReader(csv, StandardCharsets.UTF_8)) {
+            r.readLine();
+            String line;
+            while ((line = r.readLine()) != null) {
+                int comma = line.indexOf(',');
+                if (comma > 0) out.put(Integer.parseInt(line.substring(0, comma)), line);
+            }
+        }
+        return out;
+    }
+
+    static void hydrateExisting(DrawResult r) {
+        List<String> row = CalibrationFreeze.parseCsv(r.existingCsvRow);
+        int n = row.size();
+        if (n < 5) throw new IllegalArgumentException("malformed resumed ABC row for draw " + r.drawId);
+        double distance = parseDouble(row.get(n - 5));
+        r.outcomeStatus = row.get(n - 4);
+        r.failureReason = row.get(n - 3);
+        r.runtimeMillis = (long) parseDouble(row.get(n - 2));
+        r.accepted = Boolean.parseBoolean(row.get(n - 1));
+        r.distance = new CalibrationTarget.DistanceResult(distance, Collections.emptyList(), r.outcomeStatus);
+    }
+
+    static double parseDouble(String s) {
+        if (s == null || s.isEmpty()) return Double.NaN;
+        return Double.parseDouble(s);
+    }
+
+    static void writeAllOutputs(Config c, CalibrationProfile profile, List<DrawResult> results, double eps) throws Exception {
+        results.sort(Comparator.comparingInt(x -> x.drawId));
+        String header = allDrawsHeader(profile);
+        try (BufferedWriter all = Files.newBufferedWriter(c.outputDir.resolve("abc_all_draws.csv"), StandardCharsets.UTF_8);
+             BufferedWriter acc = Files.newBufferedWriter(c.outputDir.resolve("abc_accepted.csv"), StandardCharsets.UTF_8)) {
+            all.write(header); all.newLine();
+            acc.write(header); acc.newLine();
+            for (DrawResult r : results) {
+                String row = r.existingCsvRow == null ? drawCsvRow(profile, r, eps) : r.existingCsvRow;
+                all.write(row); all.newLine();
+                if (row.endsWith(",true")) { acc.write(row); acc.newLine(); }
+            }
+        }
+        writeDistanceSummary(c.outputDir.resolve("distance_summary.csv"), summarize(results, eps));
+        writeBestBreakdown(c.outputDir.resolve("best_run_target_breakdown.csv"), best(results));
+        Files.writeString(c.outputDir.resolve("resolved_config.json"), resolvedConfigJson(c, profile, "PENDING", 0, 0, eps, 0), StandardCharsets.UTF_8);
+    }
+
+    static String allDrawsHeader(CalibrationProfile profile) {
+        StringBuilder h = new StringBuilder("draw_id,proposal_seed,simulation_seed,profile,fixed_snapshot_hash");
+        for (CalibrationProfile.Parameter p : profile.parameters()) h.append(',').append(p.name);
+        for (CalibrationTarget t : CalibrationTarget.currentTargets()) {
+            h.append(",sim_").append(t.id).append(",resid_").append(t.id).append(",contrib_").append(t.id).append(",valid_").append(t.id).append(",invalid_reason_").append(t.id);
+        }
+        h.append(",total_distance,outcome_status,failure_reason,runtime_ms,accepted");
+        return h.toString();
+    }
+
+    static String drawCsvRow(CalibrationProfile profile, DrawResult r, double eps) throws Exception {
+        StringBuilder b = new StringBuilder();
+        b.append(r.drawId).append(',').append(r.proposalSeed).append(',').append(r.simulationSeed).append(',').append(csv(profile.name()))
+                .append(',').append(csv(fixedSnapshotHash(profile, r.parameters)));
+        for (CalibrationProfile.Parameter p : profile.parameters()) b.append(',').append(fmt(r.parameters == null ? Double.NaN : r.parameters.get(p.name)));
+        Map<String, CalibrationTarget.TargetResult> byId = new HashMap<>();
+        if (r.distance != null) for (CalibrationTarget.TargetResult tr : r.distance.targets) byId.put(tr.target.id, tr);
+        for (CalibrationTarget t : CalibrationTarget.currentTargets()) {
+            CalibrationTarget.TargetResult tr = byId.get(t.id);
+            b.append(',').append(fmt(tr == null ? Double.NaN : tr.simulated))
+                    .append(',').append(fmt(tr == null ? Double.NaN : tr.standardizedResidual))
+                    .append(',').append(fmt(tr == null ? Double.NaN : tr.contribution))
+                    .append(',').append(tr != null && tr.valid)
+                    .append(',').append(csv(tr == null ? "NO_TARGET_RESULT" : tr.invalidReason));
+        }
+        b.append(',').append(fmt(r.distance == null ? Double.POSITIVE_INFINITY : r.distance.distance))
+                .append(',').append(csv(r.outcomeStatus)).append(',').append(csv(r.failureReason))
+                .append(',').append(r.runtimeMillis).append(',').append(r.accepted);
+        return b.toString();
+    }
+
+    static DrawResult best(List<DrawResult> results) {
+        DrawResult best = null;
+        for (DrawResult r : results) {
+            if (r.distance == null || !Double.isFinite(r.distance.distance)) continue;
+            if (best == null || r.distance.distance < best.distance.distance) best = r;
+        }
+        if (best != null) {
+            bestMacTry = best.eventCounts.length == 0 ? 0 : bestMacTry;
+        }
+        return best;
+    }
+
+    static void writeBestBreakdown(Path file, DrawResult best) throws IOException {
+        try (BufferedWriter w = Files.newBufferedWriter(file, StandardCharsets.UTF_8)) {
+            w.write("target_id,statistic_type,step,simulated,target,weight,scale,standardized_residual,distance_contribution,share_of_d2,valid,invalid_reason\n");
+            if (best == null || best.distance == null) return;
+            double d2 = best.distance.distance * best.distance.distance;
+            for (CalibrationTarget.TargetResult tr : best.distance.targets) {
+                double share = d2 > 0.0 ? tr.contribution / d2 : 0.0;
+                w.write(csv(tr.target.id) + "," + csv(tr.target.statisticType) + "," + tr.target.step + "," +
+                        fmt(tr.simulated) + "," + fmt(tr.target.observedValue) + "," + fmt(tr.target.weight) + "," +
+                        fmt(tr.target.scale) + "," + fmt(tr.standardizedResidual) + "," + fmt(tr.contribution) + "," +
+                        fmt(share) + "," + tr.valid + "," + csv(tr.invalidReason) + "\n");
+            }
+        }
+    }
+
+    static final class Summary {
+        int totalDraws, validRuns, extinctionCount, invalidCount, exceptionCount, acceptanceCount;
+        double minDistance = Double.POSITIVE_INFINITY, medianDistance = Double.NaN, epsilon, acceptanceFraction;
+    }
+
+    static Summary summarize(List<DrawResult> results, double eps) {
+        Summary s = new Summary();
+        s.totalDraws = results.size();
+        s.epsilon = eps;
+        ArrayList<Double> finite = new ArrayList<>();
+        for (DrawResult r : results) {
+            if ("VALID_FINITE".equals(r.outcomeStatus)) s.validRuns++;
+            else if ("TUMOR_EXTINCTION".equals(r.outcomeStatus)) s.extinctionCount++;
+            else if ("MODEL_EXCEPTION".equals(r.outcomeStatus)) s.exceptionCount++;
+            else s.invalidCount++;
+            if (r.distance != null && Double.isFinite(r.distance.distance)) finite.add(r.distance.distance);
+            if (r.accepted) s.acceptanceCount++;
+        }
+        finite.sort(Double::compare);
+        if (!finite.isEmpty()) {
+            s.minDistance = finite.get(0);
+            s.medianDistance = finite.get(finite.size() / 2);
+        }
+        s.acceptanceFraction = s.totalDraws > 0 ? (double) s.acceptanceCount / s.totalDraws : 0.0;
+        return s;
+    }
+
+    static void writeDistanceSummary(Path file, Summary s) throws IOException {
+        try (BufferedWriter w = Files.newBufferedWriter(file, StandardCharsets.UTF_8)) {
+            w.write("total_draws,valid_runs,extinction_count,invalid_count,exception_count,minimum_distance,median_distance,selected_epsilon,acceptance_count,acceptance_fraction\n");
+            w.write(s.totalDraws + "," + s.validRuns + "," + s.extinctionCount + "," + s.invalidCount + "," +
+                    s.exceptionCount + "," + fmt(s.minDistance) + "," + fmt(s.medianDistance) + "," +
+                    fmt(s.epsilon) + "," + s.acceptanceCount + "," + fmt(s.acceptanceFraction) + "\n");
+        }
+    }
+
+    static void writeManifest(Config c, CalibrationProfile profile, String status, int validRuns, int accepted, double eps, long runtimeMillis) throws Exception {
+        Files.writeString(c.outputDir.resolve("run_manifest.json"),
+                resolvedConfigJson(c, profile, status, validRuns, accepted, eps, runtimeMillis), StandardCharsets.UTF_8);
+    }
+
+    static String resolvedConfigJson(Config c, CalibrationProfile profile, String status, int validRuns, int accepted, double eps, long runtimeMillis) throws Exception {
+        String targetHash = CalibrationFreeze.sha256(CalibrationTarget.canonicalCsv().getBytes(StandardCharsets.UTF_8));
+        String profileHash = CalibrationFreeze.sha256(profile.canonicalCsv().getBytes(StandardCharsets.UTF_8));
+        StringBuilder b = new StringBuilder();
+        b.append("{\n");
+        b.append("  \"repository_commit\": ").append(json(CalibrationFreeze.git("rev-parse", "HEAD"))).append(",\n");
+        b.append("  \"working_tree_dirty\": ").append(!CalibrationFreeze.git("status", "--porcelain").isEmpty()).append(",\n");
+        b.append("  \"profile\": ").append(json(profile.name())).append(",\n");
+        b.append("  \"target_profile\": \"current_abc_targets\",\n");
+        b.append("  \"master_seed\": ").append(c.seed).append(",\n");
+        b.append("  \"draws\": ").append(c.draws).append(",\n");
+        b.append("  \"epsilon_mode\": ").append(json(c.epsilon > 0.0 ? "fixed" : "quantile")).append(",\n");
+        b.append("  \"epsilon\": ").append(fmt(c.epsilon)).append(",\n");
+        b.append("  \"selected_epsilon\": ").append(fmt(eps)).append(",\n");
+        b.append("  \"quantile\": ").append(fmt(c.quantile)).append(",\n");
+        b.append("  \"init_population\": ").append(c.initPop).append(",\n");
+        b.append("  \"max_step\": ").append(c.maxStep).append(",\n");
+        b.append("  \"start_time\": ").append(json(Instant.now().toString())).append(",\n");
+        b.append("  \"completion_status\": ").append(json(status)).append(",\n");
+        b.append("  \"valid_runs\": ").append(validRuns).append(",\n");
+        b.append("  \"accepted_runs\": ").append(accepted).append(",\n");
+        b.append("  \"runtime_ms\": ").append(runtimeMillis).append(",\n");
+        b.append("  \"java_version\": ").append(json(System.getProperty("java.version"))).append(",\n");
+        b.append("  \"operating_system\": ").append(json(System.getProperty("os.name") + " " + System.getProperty("os.version"))).append(",\n");
+        b.append("  \"target_hash\": ").append(json(targetHash)).append(",\n");
+        b.append("  \"parameter_freeze_hash\": ").append(json(profileHash)).append(",\n");
+        b.append("  \"source_hashes\": {\n");
+        String[] files = {"OnLatticeExample/ExampleGrid.java", "OnLatticeExample/ModelParameters.java", "OnLatticeExample/ABCRejection.java", "OnLatticeExample/CalibrationProfile.java", "OnLatticeExample/CalibrationTarget.java"};
+        for (int i = 0; i < files.length; i++) {
+            b.append("    ").append(json(files[i])).append(": ").append(json(CalibrationFreeze.fileSha(Path.of(files[i])))).append(i + 1 < files.length ? "," : "").append("\n");
+        }
+        b.append("  }\n");
+        b.append("}\n");
+        return b.toString();
+    }
+
+    static long proposalSeed(long master, int drawId) {
+        return MorrisSensitivitySweep.mix64(master ^ 0x41424350524f504fL ^ (0x9e3779b97f4a7c15L * (drawId + 1L)));
+    }
+
+    static long simulationSeed(long master, int drawId) {
+        return MorrisSensitivitySweep.mix64(master ^ 0x41424353494d5345L ^ (0xbf58476d1ce4e5b9L * (drawId + 1L)));
+    }
+
+    static String timestamp() {
+        return java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").withZone(java.time.ZoneOffset.UTC).format(Instant.now());
+    }
+
+    static int[][] deepCopy(int[][] x) {
+        if (x == null) return new int[0][];
+        int[][] y = new int[x.length][];
+        for (int i = 0; i < x.length; i++) y[i] = x[i] == null ? new int[0] : x[i].clone();
+        return y;
+    }
+    static double[][] deepCopy(double[][] x) {
+        if (x == null) return new double[0][];
+        double[][] y = new double[x.length][];
+        for (int i = 0; i < x.length; i++) y[i] = x[i] == null ? new double[0] : x[i].clone();
+        return y;
+    }
+
+    static String fixedSnapshotHash(CalibrationProfile profile, ModelParameters p) throws Exception {
+        if (p == null) return "";
+        StringBuilder b = new StringBuilder();
+        for (ModelParameters.Definition d : ModelParameters.screenedDefinitions()) {
+            if (!profile.includes(d.name)) b.append(d.name).append('=').append(fmt(p.get(d.name))).append('\n');
+        }
+        return sha256(b.toString().getBytes(StandardCharsets.UTF_8));
+    }
+
+    static String sha256(byte[] data) throws Exception {
+        MessageDigest md = MessageDigest.getInstance("SHA-256");
+        byte[] hash = md.digest(data);
+        StringBuilder b = new StringBuilder();
+        for (byte x : hash) b.append(String.format(Locale.US, "%02x", x & 0xff));
+        return b.toString();
+    }
+
+    static void require(boolean ok, String message) {
+        if (!ok) throw new IllegalStateException(message);
+    }
+
+    static String fmt(double x) {
+        if (!Double.isFinite(x)) return Double.toString(x);
+        if (x == Math.rint(x) && Math.abs(x) < 1e15) return Long.toString((long) x);
+        return String.format(Locale.US, "%.12g", x);
+    }
+
+    static String csv(String s) {
+        if (s == null) return "\"\"";
+        return "\"" + s.replace("\"", "\"\"").replace("\r", " ").replace("\n", " ") + "\"";
+    }
+
+    static String json(String s) {
+        if (s == null) return "null";
+        return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t") + "\"";
     }
 }

@@ -1,0 +1,2 @@
+total_draws,valid_runs,extinction_count,invalid_count,exception_count,minimum_distance,median_distance,selected_epsilon,acceptance_count,acceptance_fraction
+2,1,0,1,0,5.39697906352,14.9243941588,5.39697906352,1,0.500000000000
